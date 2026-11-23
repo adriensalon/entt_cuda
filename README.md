@@ -1,7 +1,6 @@
-# entt_cuda
+# entt_gpu
 
-An EnTT style CUDA registry with host owned identity/structure and GPU authoritative
-component values. Execute `__device__` systems from EnTT like views with capture by value lambdas, without any codegen.
+An EnTT style CUDA or HIP registry with host owned identity/structure and GPU authoritative component values. Execute `__device__` systems from EnTT like views with capture by value lambdas, without any codegen.
 The compatibility reference is EnTT revision
 `1dcd7aab6548786f7672ff578639188bd2f0d837` (declaring 4.1.0). The submodule is
 unchanged.
@@ -10,9 +9,12 @@ unchanged.
 
 - CMake 3.28 or newer
 - A C++20 host compiler (tested with MSVC)
-- NVIDIA CUDA Toolkit 13.2 or newer `nvcc`
-- A CUDA capable GPU (Turing `sm_75` or newer for the CUDA 13 toolchain)
+- NVIDIA CUDA Toolkit 13.2 or newer
+- or AMD HIP SDK 6.x or newer for AMD GPUs (7.2 or newer for NVIDIA GPUs)
 - The pinned EnTT submodule, checked out with `git submodule update --init external/entt`
+
+`EnTT::Gpu` resolves to whichever backend is available, configuration fails if
+neither is.
 
 ## Usage
 
@@ -27,14 +29,19 @@ cmake --build build --config Debug
 ctest --test-dir build -C Debug --output-on-failure
 ```
 
-Consumers add the project with `add_subdirectory(...)`, link `EnTT::Cuda`, and include
-`<entt/entt_cuda.hpp>`. Device callbacks require CUDA translation units (the target
-provides `--extended-lambda`)
+Link to a CMake target:
+
+```cmake
+add_subdirectory(path/to/entt_gpu)
+target_link_libraries(my_target PRIVATE EnTT::Gpu)
+```
+
+Use as a 'regular' EnTT registry:
 
 ```cpp
 #include <cstdio>
 #include <cstdlib>
-#include <cuda_runtime.h>
+#include <entt/entt_cuda.hpp>
 
 void check(const cudaError_t err) {
     if(err != cudaSuccess) {
@@ -69,12 +76,6 @@ check(registry.destroy(e, stream, done));
 check(cudaEventSynchronize(done));
 ```
 
-## HIP backend (experimental)
+`EnTT::Gpu` is a portable umbrella target: it aliases `EnTT::Cuda` when that
+backend is usable, else `EnTT::Hip`, and errors if neither is available.
 
-The generic core in `include/entt/gpu/` is backend-agnostic; `include/entt/backend/`
-supplies `cuda_backend` and `hip_backend`, and `<entt/entt_hip.hpp>` exposes the
-`hip_registry`/`hip_view`/... aliases over the same registry. A ROCm/hipcc
-toolchain enables the optional `EnTT::Hip` interface target (detected via
-`check_language(HIP)`). The HIP backend is written and clang-format clean but
-not yet runtime-verified on this workspace, which has no AMD toolchain; see
-[docs/backend-portability.md](docs/backend-portability.md).
