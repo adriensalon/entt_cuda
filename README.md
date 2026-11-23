@@ -1,7 +1,7 @@
 # entt_cuda
 
 An EnTT-style CUDA registry with host-owned identity/structure and GPU-authoritative
-component values. See [AGENTS.md](AGENTS.md) for the roadmap.
+component values.
 
 **Current status: phase 1 (asynchronous core) complete.** Host identity, device
 pools/sparse pages, emplacement, swap-and-pop removal, transfers, and typed device
@@ -14,9 +14,7 @@ groups, order, reactivity, persistence) remain pending.
 
 The compatibility reference is EnTT revision
 `1dcd7aab6548786f7672ff578639188bd2f0d837` (declaring 4.1.0). The submodule is
-unchanged. [Contracts](docs/contracts.md) define argument placement, allocation,
-failure, ownership and ordering. [API coverage](docs/api-coverage.md) records every
-public registry declaration/const overload/deleted operation and later ECS gates.
+unchanged.
 
 ## Build on Windows
 

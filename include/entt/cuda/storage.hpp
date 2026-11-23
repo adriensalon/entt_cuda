@@ -118,20 +118,20 @@ struct cuda_pool_base {
  * @tparam Type Component type, unqualified and non-const.
  */
 template<typename Type>
-class cuda_storage final : public internal::cuda_pool_base {
+class cuda_storage final: public internal::cuda_pool_base {
     using traits_type = entt_traits<entity>;
     static constexpr bool has_value = !std::is_empty_v<Type>;
 
-    std::vector<entity> packed;        // host dense entities, in dense order
-    std::vector<entity> sparse;        // host flat sparse: sparse[to_entity(e)] = combine(pos, e) | null
-    entity *d_packed{};                // device dense entities
-    Type *d_payload{};                 // device dense component values (null for tags)
-    entity **d_pages{};                // device sparse page directory
-    std::vector<entity *> pages_host;  // host mirror of d_pages (device page pointers)
-    std::size_t size_{};
-    std::size_t cap_{};
+    std::vector<entity> packed;       // host dense entities, in dense order
+    std::vector<entity> sparse;       // host flat sparse: sparse[to_entity(e)] = combine(pos, e) | null
+    entity *d_packed{};               // device dense entities
+    Type *d_payload{};                // device dense component values (null for tags)
+    entity **d_pages{};               // device sparse page directory
+    std::vector<entity *> pages_host; // host mirror of d_pages (device page pointers)
+    std::size_t count{};
+    std::size_t reserved{};
 
-    internal::cuda_retirement *retire_;
+    internal::cuda_retirement *retirement;
 
     [[nodiscard]] std::size_t index_of(const entity value) const noexcept {
         return static_cast<std::size_t>(traits_type::to_entity(sparse[static_cast<std::size_t>(traits_type::to_entity(value))]));
@@ -174,11 +174,11 @@ class cuda_storage final : public internal::cuda_pool_base {
     }
 
     cudaError_t grow(const std::size_t required, cudaStream_t stream) {
-        if(required <= cap_) {
+        if(required <= reserved) {
             return cudaSuccess;
         }
 
-        std::size_t next = (cap_ == 0u) ? 1u : cap_;
+        std::size_t next = (reserved == 0u) ? 1u : reserved;
 
         while(next < required) {
             next *= 2u;
@@ -201,23 +201,23 @@ class cuda_storage final : public internal::cuda_pool_base {
         auto *next_packed = static_cast<entity *>(raw_packed);
         auto *next_payload = static_cast<Type *>(raw_payload);
 
-        if(size_ != 0u) {
-            cudaMemcpyAsync(next_packed, d_packed, size_ * sizeof(entity), cudaMemcpyDeviceToDevice, stream);
+        if(count != 0u) {
+            cudaMemcpyAsync(next_packed, d_packed, count * sizeof(entity), cudaMemcpyDeviceToDevice, stream);
 
             if constexpr(has_value) {
-                cudaMemcpyAsync(next_payload, d_payload, size_ * sizeof(Type), cudaMemcpyDeviceToDevice, stream);
+                cudaMemcpyAsync(next_payload, d_payload, count * sizeof(Type), cudaMemcpyDeviceToDevice, stream);
             }
         }
 
-        retire_->retire(d_packed, stream);
+        retirement->retire(d_packed, stream);
 
         if constexpr(has_value) {
-            retire_->retire(d_payload, stream);
+            retirement->retire(d_payload, stream);
         }
 
         d_packed = next_packed;
         d_payload = next_payload;
-        cap_ = next;
+        reserved = next;
 
         return cudaSuccess;
     }
@@ -235,8 +235,8 @@ class cuda_storage final : public internal::cuda_pool_base {
     }
 
 public:
-    explicit cuda_storage(internal::cuda_retirement &retire) noexcept
-        : retire_{&retire} {}
+    explicit cuda_storage(internal::cuda_retirement &other) noexcept
+        : retirement{&other} {}
 
     cuda_storage(const cuda_storage &) = delete;
     cuda_storage(cuda_storage &&) = delete;
@@ -247,20 +247,20 @@ public:
         release();
     }
 
-    void rebind_retirement(internal::cuda_retirement &retire) noexcept override {
-        retire_ = &retire;
+    void rebind_retirement(internal::cuda_retirement &other) noexcept override {
+        retirement = &other;
     }
 
     [[nodiscard]] std::size_t size() const noexcept override {
-        return size_;
+        return count;
     }
 
     [[nodiscard]] bool empty() const noexcept override {
-        return size_ == 0u;
+        return count == 0u;
     }
 
     [[nodiscard]] std::size_t capacity() const noexcept override {
-        return cap_;
+        return reserved;
     }
 
     [[nodiscard]] bool contains(const entity value) const noexcept override {
@@ -292,7 +292,7 @@ public:
         // Construction precedes any logical mutation; exceptions propagate.
         Type staged{std::forward<Args>(args)...};
 
-        const auto pos = size_;
+        const auto pos = count;
 
         if(const auto err = grow(pos + 1u, stream); err != cudaSuccess) {
             return err;
@@ -310,7 +310,7 @@ public:
         ensure_host_sparse(raw);
         sparse[raw] = cell;
         packed.push_back(value);
-        size_ = pos + 1u;
+        count = pos + 1u;
 
         cudaError_t err = cudaSuccess;
 
@@ -346,7 +346,7 @@ public:
             return cudaSuccess;
         }
         const auto pos = index_of(value);
-        const auto last_pos = size_ - 1u;
+        const auto last_pos = count - 1u;
         const entity last = packed[last_pos];
 
         if(pos != last_pos) {
@@ -356,7 +356,7 @@ public:
 
         sparse[static_cast<std::size_t>(traits_type::to_entity(value))] = internal::cuda_null_entity;
         packed.pop_back();
-        size_ = last_pos;
+        count = last_pos;
 
         cudaError_t err = cudaSuccess;
 

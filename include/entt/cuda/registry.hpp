@@ -70,7 +70,7 @@ struct cuda_registry {
     entity *d_identity{};
     std::size_t identity_cap{};
 
-    cudaError_t fault_{cudaSuccess};
+    cudaError_t fault{cudaSuccess};
 
     cuda_registry() = default;
     cuda_registry(const cuda_registry &) = delete;
@@ -139,13 +139,9 @@ private:
         return static_cast<std::size_t>(identity.find(value).index()) < identity.free_list();
     }
 
-    [[nodiscard]] cudaError_t fault() const noexcept {
-        return fault_;
-    }
-
     cudaError_t fail(const cudaError_t err) noexcept {
-        if(fault_ == cudaSuccess) {
-            fault_ = err;
+        if(fault == cudaSuccess) {
+            fault = err;
         }
 
         return err;
@@ -171,7 +167,7 @@ cuda_registry::cuda_registry(cuda_registry &&other) noexcept
       retirement{std::move(other.retirement)},
       d_identity{std::exchange(other.d_identity, nullptr)},
       identity_cap{std::exchange(other.identity_cap, 0u)},
-      fault_{other.fault_} {
+      fault{other.fault} {
     for(auto &&[key, pool]: pools) {
         pool->rebind_retirement(retirement);
     }
@@ -195,7 +191,7 @@ cuda_registry &cuda_registry::operator=(cuda_registry &&other) noexcept {
         retirement = std::move(other.retirement);
         d_identity = std::exchange(other.d_identity, nullptr);
         identity_cap = std::exchange(other.identity_cap, 0u);
-        fault_ = other.fault_;
+        fault = other.fault;
 
         for(auto &&[key, pool]: pools) {
             pool->rebind_retirement(retirement);
@@ -221,7 +217,7 @@ cuda_registry::~cuda_registry() {
 }
 
 [[nodiscard]] inline entity cuda_registry::create() {
-    if(fault_ != cudaSuccess) {
+    if(fault != cudaSuccess) {
         throw std::logic_error("entt::cuda_registry is in a fault state");
     }
 
@@ -276,7 +272,7 @@ inline cudaError_t cuda_registry::upload_identity(std::size_t &count, const enti
 template<typename Type, typename... Args>
 requires internal::cuda_component_constructible<Type, Args...>
 inline cudaError_t cuda_registry::emplace_impl(const entity value, cudaStream_t stream, cudaEvent_t done, Args &&...args) {
-    if(const auto err = fault_; err != cudaSuccess) {
+    if(const auto err = fault; err != cudaSuccess) {
         return err;
     }
 
@@ -304,7 +300,7 @@ inline cudaError_t cuda_registry::emplace_impl(const entity value, cudaStream_t 
 template<typename Type>
 requires internal::cuda_component<std::remove_const_t<Type>>
 inline cudaError_t cuda_registry::remove(const entity value, cudaStream_t stream, cudaEvent_t done) {
-    if(const auto err = fault_; err != cudaSuccess) {
+    if(const auto err = fault; err != cudaSuccess) {
         return err;
     }
 
@@ -328,7 +324,7 @@ inline cudaError_t cuda_registry::remove(const entity value, cudaStream_t stream
 template<typename Type>
 requires (internal::cuda_component<Type> && !std::is_empty_v<Type>)
 inline cudaError_t cuda_registry::get(const entity value, Type *pinned_host_dst, cudaStream_t stream, cudaEvent_t done) {
-    if(const auto err = fault_; err != cudaSuccess) {
+    if(const auto err = fault; err != cudaSuccess) {
         return err;
     }
 
@@ -356,7 +352,7 @@ inline cudaError_t cuda_registry::get(const entity value, Type *pinned_host_dst,
 template<typename Type>
 requires (internal::cuda_component<Type> && !std::is_empty_v<Type>)
 inline cudaError_t cuda_registry::assign(const entity value, const Type *pinned_host_src, cudaStream_t stream, cudaEvent_t done) {
-    if(const auto err = fault_; err != cudaSuccess) {
+    if(const auto err = fault; err != cudaSuccess) {
         return err;
     }
 
@@ -391,7 +387,7 @@ template<typename... Type, typename... Exclude>
 }
 
 inline cudaError_t cuda_registry::destroy(const entity value, cudaStream_t stream, cudaEvent_t done) {
-    if(const auto err = fault_; err != cudaSuccess) {
+    if(const auto err = fault; err != cudaSuccess) {
         return err;
     }
 
@@ -431,7 +427,7 @@ cudaError_t cuda_view<Type...>::each(Func fn, cudaStream_t stream, cudaEvent_t d
 template<typename... Type>
 template<typename Func, std::size_t... Index>
 cudaError_t cuda_view<Type...>::dispatch(Func fn, cudaStream_t stream, cudaEvent_t done, std::index_sequence<Index...>) const {
-    if(const auto err = registry->fault(); err != cudaSuccess) {
+    if(const auto err = registry->fault; err != cudaSuccess) {
         return err;
     }
 

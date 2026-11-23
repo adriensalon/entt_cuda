@@ -129,8 +129,8 @@ void api_contract(entt::cuda_registry &registry, const entt::entity entity, cuda
     registry.assign<position>(entity, pinned, stream, done);
     registry.destroy(entity, stream, done);
     registry.view<position, const velocity>().each(
-        [dt = 0.016f] __device__(position & pos, const velocity &vel) { pos.x += dt * vel.x; }, stream, done);
-    registry.view<position>(entt::exclude<tag>).each([] __device__(entt::entity, position & pos) { pos.y += 1.f; });
+        [dt = 0.016f] __device__(position &pos, const velocity &vel) { pos.x += dt * vel.x; }, stream, done);
+    registry.view<position>(entt::exclude<tag>).each([] __device__(entt::entity, position &pos) { pos.y += 1.f; });
     registry.view<tag>().each([] __device__() {});
     registry.view<>().each([] __device__(entt::entity) {}, nullptr, done);
     registry.view<>(entt::exclude<tag>).each([] __device__(entt::entity) {});

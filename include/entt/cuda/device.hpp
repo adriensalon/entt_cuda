@@ -11,6 +11,8 @@
 #include "contract.hpp"
 
 namespace entt {
+
+/*! @cond ENTT_INTERNAL */
 namespace internal {
 
 /*! @brief Public EnTT entity traits (to_entity, to_version, combine, page size). */
@@ -146,6 +148,8 @@ __global__ void cuda_view_each_kernel(Func fn, const std::size_t count, const en
 #endif // __CUDACC__
 
 } // namespace internal
+/*! @endcond */
+
 } // namespace entt
 
 #endif

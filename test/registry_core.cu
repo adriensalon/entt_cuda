@@ -1,6 +1,6 @@
+#include <array>
 #include <cstdio>
 #include <cstdlib>
-#include <array>
 #include <vector>
 #include <cuda_runtime.h>
 #include <entt/entt_cuda.hpp>
@@ -60,11 +60,11 @@ int main() {
 
     // Enough entities to cross the sparse-page boundary at entity index 4096 and
     // to force repeated device growth/retirement.
-    constexpr std::size_t N = 5000u;
+    constexpr std::size_t entity_count = 5000u;
     std::vector<entt::entity> entities;
-    entities.reserve(N);
+    entities.reserve(entity_count);
 
-    for(std::size_t i = 0; i < N; ++i) {
+    for(std::size_t i = 0; i < entity_count; ++i) {
         const auto entity = registry.create();
         entities.push_back(entity);
 
@@ -76,14 +76,14 @@ int main() {
 
     // Core dispatch: pos.x += vel.x * dt on a single stream.
     if(!check(registry.view<position, const velocity>().each(
-           [dt = 0.5f] __device__(position &pos, const velocity &vel) { pos.x += vel.x * dt; }, stream, done),
+                  [dt = 0.5f] __device__(position &pos, const velocity &vel) { pos.x += vel.x * dt; }, stream, done),
               "each")) {
         return 1;
     }
 
     check(cudaEventSynchronize(done), "sync each");
 
-    for(const std::size_t i: std::array<std::size_t, 5>{0u, 10u, 4095u, 4096u, N - 1u}) {
+    for(const std::size_t i: std::array<std::size_t, 5>{0u, 10u, 4095u, 4096u, entity_count - 1u}) {
         if(!check(registry.get<position>(entities[i], pinned, stream, done), "get")) {
             return 1;
         }
@@ -97,7 +97,7 @@ int main() {
     }
 
     // Swap-and-pop: removing a middle component relocates the last value.
-    const auto removed = entities[N / 2u];
+    const auto removed = entities[entity_count / 2u];
 
     if(!check(registry.remove<position>(removed, stream, done), "remove")) {
         return 1;
@@ -110,8 +110,8 @@ int main() {
         return 1;
     }
 
-    for(std::size_t i = 0; i < N; ++i) {
-        if(i == N / 2u) {
+    for(std::size_t i = 0; i < entity_count; ++i) {
+        if(i == entity_count / 2u) {
             continue;
         }
 
@@ -148,9 +148,9 @@ int main() {
     }
 
     // Tags, exclusions and callback forms.
-    constexpr std::size_t T = 10u;
+    constexpr std::size_t tag_count = 10u;
 
-    for(std::size_t i = 0; i < T; ++i) {
+    for(std::size_t i = 0; i < tag_count; ++i) {
         if(!check(registry.emplace<tag>(entities[i], stream), "emplace tag")) {
             return 1;
         }
@@ -174,8 +174,7 @@ int main() {
     // Excluded view: positions without the tag component.
     check(cudaMemset(counter, 0, sizeof(int)), "counter memset");
 
-    if(!check(registry.view<position>(entt::exclude<tag>).each(
-           [counter] __device__(position &) { atomicAdd(counter, 1); }, stream, done),
+    if(!check(registry.view<position>(entt::exclude<tag>).each([counter] __device__(position &) { atomicAdd(counter, 1); }, stream, done),
               "excluded view")) {
         return 1;
     }
@@ -185,8 +184,8 @@ int main() {
     int host_count{};
     check(cudaMemcpy(&host_count, counter, sizeof(int), cudaMemcpyDeviceToHost), "counter copy");
 
-    // N positions, one removed, T of the rest tagged.
-    if(host_count != static_cast<int>(N - 1u - T)) {
+    // One of the entity_count positions was removed; tag_count of the rest are tagged.
+    if(host_count != static_cast<int>(entity_count - 1u - tag_count)) {
         std::fprintf(stderr, "exclusion count mismatch: got %d\n", host_count);
         return 1;
     }
