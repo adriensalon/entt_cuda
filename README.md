@@ -1,7 +1,8 @@
 # entt_cuda
 
 An EnTT style CUDA registry with host owned identity/structure and GPU authoritative
-component values. The compatibility reference is EnTT revision
+component values. Execute `__device__` systems from EnTT like views with capture by value lambdas, without any codegen.
+The compatibility reference is EnTT revision
 `1dcd7aab6548786f7672ff578639188bd2f0d837` (declaring 4.1.0). The submodule is
 unchanged.
 
