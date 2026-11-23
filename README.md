@@ -57,8 +57,10 @@ entt::cuda_registry registry;
 const auto e = registry.create();
 check(registry.emplace<position>(e, stream, position{0, 0, 0}));
 check(registry.emplace<velocity>(e, stream, velocity{1, 2, 3}));
+
+// we have systems and lambdas at home :)
 check(registry.view<position, const velocity>().each(
-    [dt = 0.016f] __device__ (position &p, const velocity &v) {
+    [dt = 0.016f] __device__ (position &p, const velocity &v) { 
         p.x += v.x * dt;
         p.y += v.y * dt;
         p.z += v.z * dt;
