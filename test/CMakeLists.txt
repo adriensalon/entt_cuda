@@ -7,7 +7,7 @@ if(ENTT_CUDA_AVAILABLE)
 	add_test(NAME entt_cuda.host_contract COMMAND entt_cuda_host_contract)
 	set_tests_properties(entt_cuda.host_contract PROPERTIES LABELS "host;contract")
 
-	add_executable(entt_cuda_toolchain toolchain.cu)
+	add_executable(entt_cuda_toolchain toolchain_cuda.cu)
 	target_link_libraries(entt_cuda_toolchain PRIVATE EnTT::Cuda)
 	set_target_properties(entt_cuda_toolchain PROPERTIES CUDA_STANDARD_REQUIRED YES CXX_STANDARD_REQUIRED YES)
 	add_test(NAME entt_cuda.toolchain COMMAND entt_cuda_toolchain)
