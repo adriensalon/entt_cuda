@@ -3,14 +3,14 @@
 #include <entt/entity/registry.hpp>
 #include <entt/entt_cuda.hpp>
 
-static_assert(entt::internal::cuda_leading_handle<cudaStream_t, cudaStream_t &>);
-static_assert(entt::internal::cuda_leading_handle<cudaStream_t, const cudaStream_t &>);
-static_assert(entt::internal::cuda_leading_handle<cudaStream_t, std::nullptr_t, int>);
-static_assert(!entt::internal::cuda_leading_handle<cudaStream_t>);
-static_assert(!entt::internal::cuda_leading_handle<cudaStream_t, cudaEvent_t>);
-static_assert(!entt::internal::cuda_leading_handle<cudaStream_t, int>);
-static_assert(entt::internal::cuda_leading_handle<cudaEvent_t, cudaEvent_t>);
-static_assert(!entt::internal::cuda_leading_handle<cudaEvent_t, cudaStream_t>);
+static_assert(entt::internal::gpu_leading_handle<cudaStream_t, cudaStream_t &>);
+static_assert(entt::internal::gpu_leading_handle<cudaStream_t, const cudaStream_t &>);
+static_assert(entt::internal::gpu_leading_handle<cudaStream_t, std::nullptr_t, int>);
+static_assert(!entt::internal::gpu_leading_handle<cudaStream_t>);
+static_assert(!entt::internal::gpu_leading_handle<cudaStream_t, cudaEvent_t>);
+static_assert(!entt::internal::gpu_leading_handle<cudaStream_t, int>);
+static_assert(entt::internal::gpu_leading_handle<cudaEvent_t, cudaEvent_t>);
+static_assert(!entt::internal::gpu_leading_handle<cudaEvent_t, cudaStream_t>);
 
 int main() {
     // Reference expectations adapted from upstream entity/registry.cpp. These
