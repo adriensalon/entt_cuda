@@ -92,21 +92,23 @@ public:
  * @brief Type-erased view of a component pool for the registry.
  *
  * The registry owns pools through this interface so that `destroy` can remove an
- * entity from every pool without knowing each component type.
+ * Entity from every pool without knowing each component type.
+ * @tparam Entity Underlying entity identifier.
  */
+template<typename Entity = entity>
 struct cuda_pool_base {
     virtual ~cuda_pool_base() = default;
 
     [[nodiscard]] virtual std::size_t size() const noexcept = 0;
     [[nodiscard]] virtual bool empty() const noexcept = 0;
     [[nodiscard]] virtual std::size_t capacity() const noexcept = 0;
-    [[nodiscard]] virtual bool contains(const entity value) const noexcept = 0;
+    [[nodiscard]] virtual bool contains(const Entity value) const noexcept = 0;
 
     /*! @brief Returns the type hash of the stored component type. */
     [[nodiscard]] virtual id_type type() const noexcept = 0;
 
     /*! @brief Enqueues a tolerant swap-and-pop removal; a no-op if absent. */
-    virtual cudaError_t enqueue_remove(const entity value, cudaStream_t stream) = 0;
+    virtual cudaError_t enqueue_remove(const Entity value, cudaStream_t stream) = 0;
 
     /*! @brief Clears every member; host-only, no device submission. */
     virtual void clear() noexcept = 0;
@@ -120,9 +122,9 @@ struct cuda_pool_base {
     /*! @brief Frees every live device allocation (called after teardown drain). */
     virtual void release() noexcept = 0;
 
-    [[nodiscard]] virtual const entity *packed_device() const noexcept = 0;
-    [[nodiscard]] virtual const entity *const *pages() const noexcept = 0;
-    [[nodiscard]] virtual const entity *data() const noexcept = 0;
+    [[nodiscard]] virtual const Entity *packed_device() const noexcept = 0;
+    [[nodiscard]] virtual const Entity *const *pages() const noexcept = 0;
+    [[nodiscard]] virtual const Entity *data() const noexcept = 0;
 };
 
 /*! @brief Forward iterator over a pool map yielding (id, pool reference) pairs. */
@@ -191,31 +193,32 @@ public:
 /**
  * @brief A single component pool with CPU-owned membership and device-owned values.
  * @tparam Type Component type, unqualified and non-const.
+ * @tparam Entity Underlying entity identifier.
  */
-template<typename Type>
-class cuda_storage final: public internal::cuda_pool_base {
-    using traits_type = entt_traits<entity>;
+template<typename Type, typename Entity = entity>
+class cuda_storage final: public internal::cuda_pool_base<Entity> {
+    using traits_type = entt_traits<Entity>;
     static constexpr bool has_value = !std::is_empty_v<Type>;
 
-    std::vector<entity> packed;       // host dense entities, in dense order
-    std::vector<entity> sparse;       // host flat sparse: sparse[to_entity(e)] = combine(pos, e) | null
-    entity *d_packed{};               // device dense entities
+    std::vector<Entity> packed;       // host dense entities, in dense order
+    std::vector<Entity> sparse;       // host flat sparse: sparse[to_entity(e)] = combine(pos, e) | null
+    Entity *d_packed{};               // device dense entities
     Type *d_payload{};                // device dense component values (null for tags)
     Type *d_scratch{};                // device scratch for value swaps
-    entity **d_pages{};               // device sparse page directory
-    std::vector<entity *> pages_host; // host mirror of d_pages (device page pointers)
+    Entity **d_pages{};               // device sparse page directory
+    std::vector<Entity *> pages_host; // host mirror of d_pages (device page pointers)
     std::size_t count{};
     std::size_t reserved{};
 
     internal::cuda_retirement *retirement;
 
-    [[nodiscard]] std::size_t index_of(const entity value) const noexcept {
+    [[nodiscard]] std::size_t index_of(const Entity value) const noexcept {
         return static_cast<std::size_t>(traits_type::to_entity(sparse[static_cast<std::size_t>(traits_type::to_entity(value))]));
     }
 
     void ensure_host_sparse(const std::size_t raw) {
         if(raw >= sparse.size()) {
-            sparse.resize(raw + 1u, internal::cuda_null_entity);
+            sparse.resize(raw + 1u, internal::cuda_null_entity<Entity>);
         }
     }
 
@@ -223,27 +226,27 @@ class cuda_storage final: public internal::cuda_pool_base {
         if(d_pages == nullptr) {
             void *directory{};
 
-            if(cudaMalloc(&directory, internal::cuda_sparse_page_count * sizeof(entity *)) != cudaSuccess) {
+            if(cudaMalloc(&directory, internal::cuda_sparse_page_count<Entity> * sizeof(Entity *)) != cudaSuccess) {
                 return cudaErrorMemoryAllocation;
             }
 
-            d_pages = static_cast<entity **>(directory);
-            pages_host.assign(internal::cuda_sparse_page_count, nullptr);
-            cudaMemsetAsync(d_pages, 0, internal::cuda_sparse_page_count * sizeof(entity *), stream);
+            d_pages = static_cast<Entity **>(directory);
+            pages_host.assign(internal::cuda_sparse_page_count<Entity>, nullptr);
+            cudaMemsetAsync(d_pages, 0, internal::cuda_sparse_page_count<Entity> * sizeof(Entity *), stream);
         }
 
         if(pages_host[page] == nullptr) {
             void *raw{};
 
-            if(cudaMalloc(&raw, internal::cuda_sparse_page * sizeof(entity)) != cudaSuccess) {
+            if(cudaMalloc(&raw, internal::cuda_sparse_page<Entity> * sizeof(Entity)) != cudaSuccess) {
                 return cudaErrorMemoryAllocation;
             }
 
-            auto *page_ptr = static_cast<entity *>(raw);
+            auto *page_ptr = static_cast<Entity *>(raw);
             pages_host[page] = page_ptr;
             // Every byte set to 0xFF makes each cell the all-ones null identifier.
-            cudaMemsetAsync(page_ptr, 0xFF, internal::cuda_sparse_page * sizeof(entity), stream);
-            cudaMemcpyAsync(&d_pages[page], &pages_host[page], sizeof(entity *), cudaMemcpyHostToDevice, stream);
+            cudaMemsetAsync(page_ptr, 0xFF, internal::cuda_sparse_page<Entity> * sizeof(Entity), stream);
+            cudaMemcpyAsync(&d_pages[page], &pages_host[page], sizeof(Entity *), cudaMemcpyHostToDevice, stream);
         }
 
         return cudaSuccess;
@@ -263,7 +266,7 @@ class cuda_storage final: public internal::cuda_pool_base {
         void *raw_packed{};
         void *raw_payload{};
 
-        if(cudaMalloc(&raw_packed, next * sizeof(entity)) != cudaSuccess) {
+        if(cudaMalloc(&raw_packed, next * sizeof(Entity)) != cudaSuccess) {
             return cudaErrorMemoryAllocation;
         }
 
@@ -274,11 +277,11 @@ class cuda_storage final: public internal::cuda_pool_base {
             }
         }
 
-        auto *next_packed = static_cast<entity *>(raw_packed);
+        auto *next_packed = static_cast<Entity *>(raw_packed);
         auto *next_payload = static_cast<Type *>(raw_payload);
 
         if(count != 0u) {
-            cudaMemcpyAsync(next_packed, d_packed, count * sizeof(entity), cudaMemcpyDeviceToDevice, stream);
+            cudaMemcpyAsync(next_packed, d_packed, count * sizeof(Entity), cudaMemcpyDeviceToDevice, stream);
 
             if constexpr(has_value) {
                 cudaMemcpyAsync(next_payload, d_payload, count * sizeof(Type), cudaMemcpyDeviceToDevice, stream);
@@ -298,16 +301,16 @@ class cuda_storage final: public internal::cuda_pool_base {
         return cudaSuccess;
     }
 
-    cudaError_t write_sparse_cell(const entity value, const entity cell, cudaStream_t stream) {
+    cudaError_t write_sparse_cell(const Entity value, const Entity cell, cudaStream_t stream) {
         const auto raw = static_cast<std::size_t>(traits_type::to_entity(value));
-        const auto page = raw / internal::cuda_sparse_page;
-        const auto offset = raw % internal::cuda_sparse_page;
+        const auto page = raw / internal::cuda_sparse_page<Entity>;
+        const auto offset = raw % internal::cuda_sparse_page<Entity>;
 
         if(const auto err = ensure_page(page, stream); err != cudaSuccess) {
             return err;
         }
 
-        return cudaMemcpyAsync(pages_host[page] + offset, &cell, sizeof(entity), cudaMemcpyHostToDevice, stream);
+        return cudaMemcpyAsync(pages_host[page] + offset, &cell, sizeof(Entity), cudaMemcpyHostToDevice, stream);
     }
 
 public:
@@ -343,20 +346,20 @@ public:
         return reserved;
     }
 
-    [[nodiscard]] bool contains(const entity value) const noexcept override {
+    [[nodiscard]] bool contains(const Entity value) const noexcept override {
         const auto raw = static_cast<std::size_t>(traits_type::to_entity(value));
-        return raw < sparse.size() && sparse[raw] != internal::cuda_null_entity && traits_type::to_version(sparse[raw]) == traits_type::to_version(value);
+        return raw < sparse.size() && sparse[raw] != internal::cuda_null_entity<Entity> && traits_type::to_version(sparse[raw]) == traits_type::to_version(value);
     }
 
-    [[nodiscard]] const entity *packed_device() const noexcept override {
+    [[nodiscard]] const Entity *packed_device() const noexcept override {
         return d_packed;
     }
 
-    [[nodiscard]] const entity *data() const noexcept override {
+    [[nodiscard]] const Entity *data() const noexcept override {
         return packed.data();
     }
 
-    [[nodiscard]] const entity *const *pages() const noexcept override {
+    [[nodiscard]] const Entity *const *pages() const noexcept override {
         return d_pages;
     }
 
@@ -370,9 +373,9 @@ public:
         }
     }
 
-    /*! @brief Returns the typed device pointer for an entity, or null if absent. */
+    /*! @brief Returns the typed device pointer for an Entity, or null if absent. */
     template<typename Other>
-    [[nodiscard]] Other *try_get(const entity value) const noexcept {
+    [[nodiscard]] Other *try_get(const Entity value) const noexcept {
         if constexpr(has_value) {
             return contains(value) ? static_cast<Other *>(d_payload + index_of(value)) : nullptr;
         } else {
@@ -380,8 +383,8 @@ public:
         }
     }
 
-    /*! @brief Returns the dense position of an entity (valid members only). */
-    [[nodiscard]] std::size_t index(const entity value) const noexcept {
+    /*! @brief Returns the dense position of an Entity (valid members only). */
+    [[nodiscard]] std::size_t index(const Entity value) const noexcept {
         return index_of(value);
     }
 
@@ -428,7 +431,7 @@ public:
 
     /*! @brief Constructs the component on the host and enqueues its upload. */
     template<typename... Args>
-    cudaError_t emplace(const entity value, cudaStream_t stream, Args &&...args) {
+    cudaError_t emplace(const Entity value, cudaStream_t stream, Args &&...args) {
         // Construction precedes any logical mutation; exceptions propagate.
         Type staged{std::forward<Args>(args)...};
 
@@ -439,14 +442,14 @@ public:
         }
 
         const auto raw = static_cast<std::size_t>(traits_type::to_entity(value));
-        const auto page = raw / internal::cuda_sparse_page;
+        const auto page = raw / internal::cuda_sparse_page<Entity>;
 
         if(const auto err = ensure_page(page, stream); err != cudaSuccess) {
             return err;
         }
 
         // Commit host metadata only after every allocation has succeeded.
-        const auto cell = internal::cuda_combine(pos, value);
+        const auto cell = internal::cuda_combine<Entity>(pos, value);
         ensure_host_sparse(raw);
         sparse[raw] = cell;
         packed.push_back(value);
@@ -459,7 +462,7 @@ public:
         }
 
         if(err == cudaSuccess) {
-            err = cudaMemcpyAsync(d_packed + pos, &value, sizeof(entity), cudaMemcpyHostToDevice, stream);
+            err = cudaMemcpyAsync(d_packed + pos, &value, sizeof(Entity), cudaMemcpyHostToDevice, stream);
         }
 
         if(err == cudaSuccess) {
@@ -470,20 +473,20 @@ public:
     }
 
     /*! @brief Enqueues a device-to-host download of the component value. */
-    cudaError_t enqueue_get(const entity value, Type *dst, cudaStream_t stream) const {
+    cudaError_t enqueue_get(const Entity value, Type *dst, cudaStream_t stream) const {
         const auto pos = index_of(value);
         return cudaMemcpyAsync(dst, d_payload + pos, sizeof(Type), cudaMemcpyDeviceToHost, stream);
     }
 
     /*! @brief Enqueues a host-to-device upload of the component value. */
-    cudaError_t enqueue_assign(const entity value, const Type *src, cudaStream_t stream) {
+    cudaError_t enqueue_assign(const Entity value, const Type *src, cudaStream_t stream) {
         const auto pos = index_of(value);
         return cudaMemcpyAsync(d_payload + pos, src, sizeof(Type), cudaMemcpyHostToDevice, stream);
     }
 
     /*! @brief Constructs a replacement value on the host and uploads it in place. */
     template<typename... Args>
-    cudaError_t replace(const entity value, cudaStream_t stream, Args &&...args) {
+    cudaError_t replace(const Entity value, cudaStream_t stream, Args &&...args) {
         if constexpr(has_value) {
             Type staged{std::forward<Args>(args)...};
             const auto pos = index_of(value);
@@ -499,13 +502,13 @@ public:
             return cudaSuccess;
         }
 
-        const entity lhs_entity = packed[lhs];
-        const entity rhs_entity = packed[rhs];
+        const Entity lhs_entity = packed[lhs];
+        const Entity rhs_entity = packed[rhs];
 
         packed[lhs] = rhs_entity;
         packed[rhs] = lhs_entity;
-        sparse[static_cast<std::size_t>(traits_type::to_entity(lhs_entity))] = internal::cuda_combine(rhs, lhs_entity);
-        sparse[static_cast<std::size_t>(traits_type::to_entity(rhs_entity))] = internal::cuda_combine(lhs, rhs_entity);
+        sparse[static_cast<std::size_t>(traits_type::to_entity(lhs_entity))] = internal::cuda_combine<Entity>(rhs, lhs_entity);
+        sparse[static_cast<std::size_t>(traits_type::to_entity(rhs_entity))] = internal::cuda_combine<Entity>(lhs, rhs_entity);
 
         cudaError_t err = cudaSuccess;
 
@@ -518,11 +521,11 @@ public:
         }
 
         if(err == cudaSuccess) {
-            err = cudaMemcpyAsync(d_packed + lhs, &rhs_entity, sizeof(entity), cudaMemcpyHostToDevice, stream);
+            err = cudaMemcpyAsync(d_packed + lhs, &rhs_entity, sizeof(Entity), cudaMemcpyHostToDevice, stream);
         }
 
         if(err == cudaSuccess) {
-            err = cudaMemcpyAsync(d_packed + rhs, &lhs_entity, sizeof(entity), cudaMemcpyHostToDevice, stream);
+            err = cudaMemcpyAsync(d_packed + rhs, &lhs_entity, sizeof(Entity), cudaMemcpyHostToDevice, stream);
         }
 
         if constexpr(has_value) {
@@ -536,11 +539,11 @@ public:
         }
 
         if(err == cudaSuccess) {
-            err = write_sparse_cell(lhs_entity, internal::cuda_combine(rhs, lhs_entity), stream);
+            err = write_sparse_cell(lhs_entity, internal::cuda_combine<Entity>(rhs, lhs_entity), stream);
         }
 
         if(err == cudaSuccess) {
-            err = write_sparse_cell(rhs_entity, internal::cuda_combine(lhs, rhs_entity), stream);
+            err = write_sparse_cell(rhs_entity, internal::cuda_combine<Entity>(lhs, rhs_entity), stream);
         }
 
         return err;
@@ -560,7 +563,7 @@ public:
             }
         }
 
-        std::vector<entity> ordered(n);
+        std::vector<Entity> ordered(n);
 
         for(std::size_t pos = 0u; pos < n; ++pos) {
             ordered[pos] = packed[perm[pos]];
@@ -569,13 +572,13 @@ public:
         packed = std::move(ordered);
 
         for(std::size_t pos = 0u; pos < n; ++pos) {
-            sparse[static_cast<std::size_t>(traits_type::to_entity(packed[pos]))] = internal::cuda_combine(pos, packed[pos]);
+            sparse[static_cast<std::size_t>(traits_type::to_entity(packed[pos]))] = internal::cuda_combine<Entity>(pos, packed[pos]);
         }
 
         cudaError_t err = cudaSuccess;
 
         if(n != 0u) {
-            err = cudaMemcpyAsync(d_packed, packed.data(), n * sizeof(entity), cudaMemcpyHostToDevice, stream);
+            err = cudaMemcpyAsync(d_packed, packed.data(), n * sizeof(Entity), cudaMemcpyHostToDevice, stream);
 
             if constexpr(has_value) {
                 std::vector<Type> values(n);
@@ -590,14 +593,14 @@ public:
             }
 
             for(std::size_t pos = 0u; pos < n && err == cudaSuccess; ++pos) {
-                err = write_sparse_cell(packed[pos], internal::cuda_combine(pos, packed[pos]), stream);
+                err = write_sparse_cell(packed[pos], internal::cuda_combine<Entity>(pos, packed[pos]), stream);
             }
         }
 
         return err;
     }
 
-    /*! @brief Sorts the dense entities by an entity comparator. */
+    /*! @brief Sorts the dense entities by an Entity comparator. */
     template<typename Compare>
     cudaError_t sort_entities(Compare compare, cudaStream_t stream) {
         std::vector<std::size_t> perm(count);
@@ -621,20 +624,20 @@ public:
         return reorder(perm, stream);
     }
 
-    cudaError_t enqueue_remove(const entity value, cudaStream_t stream) override {
+    cudaError_t enqueue_remove(const Entity value, cudaStream_t stream) override {
         if(!contains(value)) {
             return cudaSuccess;
         }
         const auto pos = index_of(value);
         const auto last_pos = count - 1u;
-        const entity last = packed[last_pos];
+        const Entity last = packed[last_pos];
 
         if(pos != last_pos) {
             packed[pos] = last;
-            sparse[static_cast<std::size_t>(traits_type::to_entity(last))] = internal::cuda_combine(pos, last);
+            sparse[static_cast<std::size_t>(traits_type::to_entity(last))] = internal::cuda_combine<Entity>(pos, last);
         }
 
-        sparse[static_cast<std::size_t>(traits_type::to_entity(value))] = internal::cuda_null_entity;
+        sparse[static_cast<std::size_t>(traits_type::to_entity(value))] = internal::cuda_null_entity<Entity>;
         packed.pop_back();
         count = last_pos;
 
@@ -646,16 +649,16 @@ public:
             }
 
             if(err == cudaSuccess) {
-                err = cudaMemcpyAsync(d_packed + pos, &last, sizeof(entity), cudaMemcpyHostToDevice, stream);
+                err = cudaMemcpyAsync(d_packed + pos, &last, sizeof(Entity), cudaMemcpyHostToDevice, stream);
             }
 
             if(err == cudaSuccess) {
-                err = write_sparse_cell(last, internal::cuda_combine(pos, last), stream);
+                err = write_sparse_cell(last, internal::cuda_combine<Entity>(pos, last), stream);
             }
         }
 
         if(err == cudaSuccess) {
-            err = write_sparse_cell(value, internal::cuda_null_entity, stream);
+            err = write_sparse_cell(value, internal::cuda_null_entity<Entity>, stream);
         }
 
         return err;

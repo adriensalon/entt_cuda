@@ -3,13 +3,13 @@
 An EnTT-style CUDA registry with host-owned identity/structure and GPU-authoritative
 component values.
 
-**Current status: phase 5 (reactivity/persistence) implemented.** Phases 1-4
-delivered the asynchronous core, registry breadth, query/storage breadth, and
-groups/order/policies. Phase 5 adds `on_construct`/`on_update`/`on_destroy` sinks
-(reusing `entt::sigh`/`sink`) with triggering-stream notifications and
-destroy-before-removal order, plus a `cuda_snapshot`/`cuda_snapshot_loader` full
-round-trip. Remaining: reactive version tracking, continuous/named snapshot
-mapping, allocator customization and `basic_cuda_registry` (phase 6).
+**Current status: phases 0-6 complete.** The delivery gates are implemented and
+tested: the asynchronous core, registry breadth, query/storage breadth,
+groups/order/policies, reactivity/persistence, and customization
+(`basic_cuda_registry<Entity, Allocator>` with a custom entity type and host
+allocator, plus `get_allocator`, `swap` and the allocator/count constructors).
+Remaining optional work: CUDA Graph capture/replay, the organizer/helper/handle
+adaptations, and allocation-path optimization.
 
 The compatibility reference is EnTT revision
 `1dcd7aab6548786f7672ff578639188bd2f0d837` (declaring 4.1.0). The submodule is

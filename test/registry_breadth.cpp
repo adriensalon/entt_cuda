@@ -300,6 +300,35 @@ int main() {
         return 1;
     }
 
+    // Customization: a 64-bit entity type, the allocator accessor, and swap.
+    {
+        entt::basic_cuda_registry<std::uint64_t> wide;
+
+        const auto entity = wide.create();
+
+        if(!check(wide.emplace<position>(entity, position{1.f, 2.f, 3.f}), "wide emplace")
+           || !check(cudaStreamSynchronize(nullptr), "sync wide")
+           || !check(wide.get<position>(entity, pinned), "wide get")
+           || !check(cudaStreamSynchronize(nullptr), "sync wide get")
+           || pinned->x != 1.f) {
+            std::fprintf(stderr, "custom entity type mismatch\n");
+            return 1;
+        }
+
+        if(wide.get_allocator() != std::allocator<std::uint64_t>{}) {
+            std::fprintf(stderr, "get_allocator mismatch\n");
+            return 1;
+        }
+
+        entt::basic_cuda_registry<std::uint64_t> other{std::allocator<std::uint64_t>{}};
+        wide.swap(other);
+
+        if(wide.valid(entity) || !other.valid(entity)) {
+            std::fprintf(stderr, "swap mismatch\n");
+            return 1;
+        }
+    }
+
     std::puts("registry breadth tests passed.");
     check(cudaFreeHost(pinned), "pinned free");
     cudaEventDestroy(done);
