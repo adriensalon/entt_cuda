@@ -3,7 +3,7 @@ project(EnTTCuda VERSION 0.1.0 LANGUAGES CXX CUDA)
 
 # entt
 set(ENTT_CUDA_ENTT_REVISION "1dcd7aab6548786f7672ff578639188bd2f0d837")
-set(entt_cuda_reference "${CMAKE_CURRENT_LIST_DIR}/../external/entt")
+set(entt_cuda_reference "${CMAKE_CURRENT_LIST_DIR}/external/entt")
 if(NOT EXISTS "${entt_cuda_reference}/src/entt/entity/registry.hpp")
     message(FATAL_ERROR "Missing EnTT reference. Run git submodule update --init external/entt.")
 endif()
