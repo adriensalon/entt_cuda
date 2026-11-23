@@ -199,6 +199,7 @@ class cuda_storage final: public internal::cuda_pool_base {
     std::vector<entity> sparse;       // host flat sparse: sparse[to_entity(e)] = combine(pos, e) | null
     entity *d_packed{};               // device dense entities
     Type *d_payload{};                // device dense component values (null for tags)
+    Type *d_scratch{};                // device scratch for value swaps
     entity **d_pages{};               // device sparse page directory
     std::vector<entity *> pages_host; // host mirror of d_pages (device page pointers)
     std::size_t count{};
@@ -377,6 +378,11 @@ public:
         }
     }
 
+    /*! @brief Returns the dense position of an entity (valid members only). */
+    [[nodiscard]] std::size_t index(const entity value) const noexcept {
+        return index_of(value);
+    }
+
     /*! @brief Clears every member; host-only, no device submission. */
     void clear() noexcept override {
         packed.clear();
@@ -390,6 +396,7 @@ public:
 
         if constexpr(has_value) {
             retirement->retire(d_payload, stream);
+            retirement->retire(d_scratch, stream);
         }
 
         for(auto *page: pages_host) {
@@ -400,6 +407,7 @@ public:
 
         d_packed = nullptr;
         d_payload = nullptr;
+        d_scratch = nullptr;
         pages_host.clear();
         d_pages = nullptr;
         packed.clear();
@@ -474,6 +482,59 @@ public:
         }
     }
 
+    /*! @brief Swaps two dense slots, reordering host and device state together. */
+    cudaError_t swap_elements(const std::size_t lhs, const std::size_t rhs, cudaStream_t stream) {
+        if(lhs == rhs) {
+            return cudaSuccess;
+        }
+
+        const entity lhs_entity = packed[lhs];
+        const entity rhs_entity = packed[rhs];
+
+        packed[lhs] = rhs_entity;
+        packed[rhs] = lhs_entity;
+        sparse[static_cast<std::size_t>(traits_type::to_entity(lhs_entity))] = internal::cuda_combine(rhs, lhs_entity);
+        sparse[static_cast<std::size_t>(traits_type::to_entity(rhs_entity))] = internal::cuda_combine(lhs, rhs_entity);
+
+        cudaError_t err = cudaSuccess;
+
+        if constexpr(has_value) {
+            if(d_scratch == nullptr && cudaMalloc(reinterpret_cast<void **>(&d_scratch), sizeof(Type)) != cudaSuccess) {
+                return cudaErrorMemoryAllocation;
+            }
+
+            err = cudaMemcpyAsync(d_scratch, d_payload + lhs, sizeof(Type), cudaMemcpyDeviceToDevice, stream);
+        }
+
+        if(err == cudaSuccess) {
+            err = cudaMemcpyAsync(d_packed + lhs, &rhs_entity, sizeof(entity), cudaMemcpyHostToDevice, stream);
+        }
+
+        if(err == cudaSuccess) {
+            err = cudaMemcpyAsync(d_packed + rhs, &lhs_entity, sizeof(entity), cudaMemcpyHostToDevice, stream);
+        }
+
+        if constexpr(has_value) {
+            if(err == cudaSuccess) {
+                err = cudaMemcpyAsync(d_payload + lhs, d_payload + rhs, sizeof(Type), cudaMemcpyDeviceToDevice, stream);
+            }
+
+            if(err == cudaSuccess) {
+                err = cudaMemcpyAsync(d_payload + rhs, d_scratch, sizeof(Type), cudaMemcpyDeviceToDevice, stream);
+            }
+        }
+
+        if(err == cudaSuccess) {
+            err = write_sparse_cell(lhs_entity, internal::cuda_combine(rhs, lhs_entity), stream);
+        }
+
+        if(err == cudaSuccess) {
+            err = write_sparse_cell(rhs_entity, internal::cuda_combine(lhs, rhs_entity), stream);
+        }
+
+        return err;
+    }
+
     cudaError_t enqueue_remove(const entity value, cudaStream_t stream) override {
         if(!contains(value)) {
             return cudaSuccess;
@@ -524,6 +585,11 @@ public:
             if(d_payload != nullptr) {
                 cudaFree(d_payload);
                 d_payload = nullptr;
+            }
+
+            if(d_scratch != nullptr) {
+                cudaFree(d_scratch);
+                d_scratch = nullptr;
             }
         }
 

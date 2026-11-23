@@ -3,14 +3,13 @@
 An EnTT-style CUDA registry with host-owned identity/structure and GPU-authoritative
 component values.
 
-**Current status: phase 3 (query/storage breadth) complete.** Phase 1 delivered
-the asynchronous core and phase 2 the registry breadth. Phase 3 adds named pools
-(`storage<T>(id)`), nullable type-erased lookup (`storage(id)`), pool enumeration
-(`storage()`), stream-aware `reset(id)` with allocation retirement,
-`storage_for_type<T>`, typed view `contains`/`size_hint`/host `each_entity`/`rebind`,
-and a runtime view dispatching entity identifiers without runtime device
-compilation. Remaining gates (groups, order, reactivity, persistence, allocator
-customization) stay pending.
+**Current status: phase 4 (groups/order/policies) implemented.** Phases 1-3
+delivered the asynchronous core, registry breadth, and query/storage breadth.
+Phase 4 adds non-owning groups (cached matching entities), owning groups (owned
+pools arranged for aligned permutations with CPU/GPU slot agreement), `owned`,
+`group_if_exists`, and `compact`. Value/order `sort` and signal-driven incremental
+group maintenance stay pending, as do the later gates (reactivity, persistence,
+allocator customization).
 
 The compatibility reference is EnTT revision
 `1dcd7aab6548786f7672ff578639188bd2f0d837` (declaring 4.1.0). The submodule is
@@ -87,6 +86,9 @@ python tools/check-format.py --fix     # rewrite in place
   lookup, pool enumeration, stream-aware `reset`, typed view `contains`/`size_hint`,
   host entity iteration and rebinding. `registry_core.cu` additionally covers the
   runtime view dispatching entity identifiers.
+- `registry_group.cu` exercises the phase-4 surface: non-owning and owning groups,
+  aligned permutations with CPU/GPU slot agreement, `owned`, `group_if_exists`,
+  and `compact`.
 - `toolchain.cu` keeps the standalone extended-lambda and pinned transfer smoke
   test as a driver/runtime canary.
 

@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <cuda_runtime_api.h>
@@ -32,6 +33,9 @@ struct cuda_view;
 struct cuda_registry;
 
 class cuda_runtime_view;
+
+template<typename Owned, typename Get = get_t<>, typename Exclude = exclude_t<>>
+struct cuda_group;
 
 /**
  * @brief CUDA query result. Snapshot descriptors and dispatch on each call.
@@ -118,6 +122,9 @@ struct cuda_registry {
 
     friend class cuda_runtime_view;
 
+    template<typename, typename, typename>
+    friend struct cuda_group;
+
     /*! @brief Reused upstream identity storage (generation + free list). */
     using identity_storage = basic_storage<entity>;
     /*! @brief Pool container keyed by type hash. */
@@ -146,11 +153,14 @@ struct cuda_registry {
 
     identity_storage identity;
     pool_container pools;
+    std::unordered_set<id_type> owned_types;
     internal::cuda_retirement retirement;
     context vars{allocator_type{}};
 
     entity *d_identity{};
     std::size_t identity_cap{};
+    entity *d_list{};
+    std::size_t list_cap{};
 
     mutable cudaError_t fault{cudaSuccess};
 
@@ -382,6 +392,24 @@ struct cuda_registry {
     /*! @brief Returns a runtime view bound to this registry. */
     [[nodiscard]] cuda_runtime_view runtime_view() noexcept;
 
+    /*! @brief Returns a group for the given owned/observed/excluded elements. */
+    template<typename... Owned, typename... Get, typename... Exclude>
+    [[nodiscard]] cuda_group<owned_t<Owned...>, get_t<Get...>, exclude_t<Exclude...>> group(get_t<Get...> = get_t{}, exclude_t<Exclude...> = exclude_t{});
+
+    /*! @brief Returns a group for the given elements without creating pools. */
+    template<typename... Owned, typename... Get, typename... Exclude>
+    [[nodiscard]] cuda_group<owned_t<>, get_t<const Owned..., const Get...>, exclude_t<const Exclude...>> group_if_exists(get_t<Get...> = get_t{}, exclude_t<Exclude...> = exclude_t{}) const;
+
+    /*! @brief Checks whether the given elements are owned by a group. */
+    template<typename... Type>
+    [[nodiscard]] bool owned() const noexcept {
+        return (owned_types.contains(type_hash<std::remove_const_t<Type>>::value()) || ...);
+    }
+
+    /*! @brief Removes tombstones; a no-op for swap-and-pop pools. */
+    template<typename... Type>
+    cudaError_t compact(cudaStream_t stream = nullptr, cudaEvent_t done = nullptr);
+
     template<typename Type>
     requires internal::cuda_component<Type>
     [[nodiscard]] cuda_storage<Type> &storage(const id_type id = type_hash<Type>::value()) {
@@ -459,6 +487,8 @@ private:
 
     cudaError_t upload_identity(std::size_t &count, const entity *&out, cudaStream_t stream);
 
+    cudaError_t upload_list(const entity *src, std::size_t count, const entity *&out, cudaStream_t stream);
+
     template<typename Type, typename... Args>
     requires internal::cuda_component_constructible<Type, Args...>
     cudaError_t emplace_impl(entity value, cudaStream_t stream, cudaEvent_t done, Args &&...args);
@@ -482,10 +512,13 @@ private:
 inline cuda_registry::cuda_registry(cuda_registry &&other) noexcept
     : identity{std::move(other.identity)},
       pools{std::move(other.pools)},
+      owned_types{std::move(other.owned_types)},
       retirement{std::move(other.retirement)},
       vars{std::move(other.vars)},
       d_identity{std::exchange(other.d_identity, nullptr)},
       identity_cap{std::exchange(other.identity_cap, 0u)},
+      d_list{std::exchange(other.d_list, nullptr)},
+      list_cap{std::exchange(other.list_cap, 0u)},
       fault{other.fault} {
     for(auto &&[key, pool]: pools) {
         pool->rebind_retirement(retirement);
@@ -507,10 +540,13 @@ inline cuda_registry &cuda_registry::operator=(cuda_registry &&other) noexcept {
 
         identity = std::move(other.identity);
         pools = std::move(other.pools);
+        owned_types = std::move(other.owned_types);
         retirement = std::move(other.retirement);
         vars = std::move(other.vars);
         d_identity = std::exchange(other.d_identity, nullptr);
         identity_cap = std::exchange(other.identity_cap, 0u);
+        d_list = std::exchange(other.d_list, nullptr);
+        list_cap = std::exchange(other.list_cap, 0u);
         fault = other.fault;
 
         for(auto &&[key, pool]: pools) {
@@ -533,6 +569,11 @@ inline cuda_registry::~cuda_registry() {
     if(d_identity != nullptr) {
         cudaFree(d_identity);
         d_identity = nullptr;
+    }
+
+    if(d_list != nullptr) {
+        cudaFree(d_list);
+        d_list = nullptr;
     }
 }
 
@@ -705,6 +746,29 @@ inline cudaError_t cuda_registry::upload_identity(std::size_t &count, const enti
 
     out = d_identity;
     return cudaMemcpyAsync(d_identity, identity.data(), count * sizeof(entity), cudaMemcpyHostToDevice, stream);
+}
+
+inline cudaError_t cuda_registry::upload_list(const entity *src, const std::size_t count, const entity *&out, cudaStream_t stream) {
+    out = nullptr;
+
+    if(count == 0u) {
+        return cudaSuccess;
+    }
+
+    if(count > list_cap) {
+        entity *next{};
+
+        if(cudaMalloc(reinterpret_cast<void **>(&next), count * sizeof(entity)) != cudaSuccess) {
+            return cudaErrorMemoryAllocation;
+        }
+
+        retirement.retire(d_list, stream);
+        d_list = next;
+        list_cap = count;
+    }
+
+    out = d_list;
+    return cudaMemcpyAsync(d_list, src, count * sizeof(entity), cudaMemcpyHostToDevice, stream);
 }
 
 template<typename Type, typename... Args>
@@ -1245,7 +1309,309 @@ public:
     return cuda_runtime_view{this};
 }
 
+namespace internal {
+
+/*! @brief Computes the entities matching a set of required and excluded pools. */
+inline std::vector<entity> group_members(const std::vector<cuda_pool_base *> &required, const std::vector<cuda_pool_base *> &excluded,
+                                         const entity *alive, const std::size_t alive_count) {
+    std::vector<entity> members;
+
+    if(required.empty()) {
+        for(std::size_t pos = 0u; pos < alive_count; ++pos) {
+            const entity value = alive[pos];
+            const auto rejected = std::any_of(excluded.begin(), excluded.end(), [&](const auto *pool) { return pool && pool->contains(value); });
+
+            if(!rejected) {
+                members.push_back(value);
+            }
+        }
+
+        return members;
+    }
+
+    if(std::any_of(required.begin(), required.end(), [](const auto *pool) { return pool == nullptr; })) {
+        return members;
+    }
+
+    const auto *candidate = *std::min_element(required.begin(), required.end(), [](const auto *lhs, const auto *rhs) { return lhs->size() < rhs->size(); });
+
+    for(std::size_t pos = 0u; pos < candidate->size(); ++pos) {
+        const entity value = candidate->data()[pos];
+        bool valid = true;
+
+        for(const auto *pool: required) {
+            if(!pool->contains(value)) {
+                valid = false;
+                break;
+            }
+        }
+
+        if(valid) {
+            for(const auto *pool: excluded) {
+                if(pool->contains(value)) {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+
+        if(valid) {
+            members.push_back(value);
+        }
+    }
+
+    return members;
+}
+
+/*! @brief Arranges a storage so matching entities occupy [0, matching.size()). */
+template<typename Storage>
+void arrange_storage(Storage &storage, const std::vector<entity> &matching, cudaStream_t stream) {
+    for(std::size_t pos = 0u; pos < matching.size(); ++pos) {
+        const auto idx = storage.index(matching[pos]);
+
+        if(idx != pos) {
+            storage.swap_elements(idx, pos, stream);
+        }
+    }
+}
+
+} // namespace internal
+
+/**
+ * @brief Non-owning group: a cached list of matching entities.
+ * @tparam Get Observed component types, possibly const-qualified.
+ * @tparam Exclude Excluded component types.
+ */
+template<typename... Get, typename... Exclude>
+struct cuda_group<owned_t<>, get_t<Get...>, exclude_t<Exclude...>> {
+    cuda_registry *registry{};
+    std::tuple<cuda_storage<std::remove_const_t<Get>> *...> get_storages{};
+    std::vector<internal::cuda_pool_base *> excluded_pools{};
+    std::vector<entity> members{};
+
+    cuda_group() = default;
+
+    cuda_group(cuda_registry *owner, std::tuple<cuda_storage<std::remove_const_t<Get>> *...> get, std::vector<internal::cuda_pool_base *> exclude)
+        : registry{owner},
+          get_storages{get},
+          excluded_pools{std::move(exclude)} {
+        std::vector<internal::cuda_pool_base *> required;
+        std::apply([&](auto *...component) { (required.push_back(static_cast<internal::cuda_pool_base *>(component)), ...); }, get_storages);
+        members = internal::group_members(required, excluded_pools, registry->identity.data(), registry->identity.free_list());
+    }
+
+    /*! @brief Returns the number of entities in the group. */
+    [[nodiscard]] std::size_t size() const noexcept {
+        return members.size();
+    }
+
+    /*! @brief Checks whether the group is empty. */
+    [[nodiscard]] bool empty() const noexcept {
+        return members.empty();
+    }
+
+    /*! @brief Checks if the group contains an entity. */
+    [[nodiscard]] bool contains(const entity value) const noexcept {
+        return std::find(members.begin(), members.end(), value) != members.end();
+    }
+
+    template<typename Func>
+    cudaError_t each(Func fn, cudaStream_t stream = nullptr, cudaEvent_t done = nullptr) const;
+};
+
+/**
+ * @brief Owning group: owned pools are arranged so members are at the front.
+ * @tparam Owned Owned component types.
+ * @tparam Get Observed component types, possibly const-qualified.
+ * @tparam Exclude Excluded component types.
+ */
+template<typename... Owned, typename... Get, typename... Exclude>
+struct cuda_group<owned_t<Owned...>, get_t<Get...>, exclude_t<Exclude...>> {
+    cuda_registry *registry{};
+    std::tuple<cuda_storage<std::remove_const_t<Owned>> *...> owned_storages{};
+    std::tuple<cuda_storage<std::remove_const_t<Get>> *...> get_storages{};
+    std::vector<internal::cuda_pool_base *> excluded_pools{};
+    std::size_t length{};
+
+    cuda_group() = default;
+
+    cuda_group(cuda_registry *owner, std::tuple<cuda_storage<std::remove_const_t<Owned>> *...> owned,
+               std::tuple<cuda_storage<std::remove_const_t<Get>> *...> get, std::vector<internal::cuda_pool_base *> exclude, cudaStream_t stream)
+        : registry{owner},
+          owned_storages{owned},
+          get_storages{get},
+          excluded_pools{std::move(exclude)} {
+        std::vector<internal::cuda_pool_base *> required;
+        std::apply([&](auto *...component) { (required.push_back(static_cast<internal::cuda_pool_base *>(component)), ...); }, owned_storages);
+        std::apply([&](auto *...component) { (required.push_back(static_cast<internal::cuda_pool_base *>(component)), ...); }, get_storages);
+        const auto matching = internal::group_members(required, excluded_pools, registry->identity.data(), registry->identity.free_list());
+        length = matching.size();
+
+        // Arrange every owned pool so matching entities occupy [0, length) in order.
+        std::apply([&](auto *...component) {
+            (internal::arrange_storage(*component, matching, stream), ...);
+        },
+                   owned_storages);
+    }
+
+    /*! @brief Returns the number of entities in the group. */
+    [[nodiscard]] std::size_t size() const noexcept {
+        return length;
+    }
+
+    /*! @brief Checks whether the group is empty. */
+    [[nodiscard]] bool empty() const noexcept {
+        return length == 0u;
+    }
+
+    /*! @brief Checks if the group contains an entity. */
+    [[nodiscard]] bool contains(const entity value) const noexcept {
+        if constexpr(sizeof...(Owned) == 0u) {
+            return false;
+        } else {
+            auto *leading = std::get<0>(owned_storages);
+            return leading->contains(value) && leading->index(value) < length;
+        }
+    }
+
+    template<typename Func>
+    cudaError_t each(Func fn, cudaStream_t stream = nullptr, cudaEvent_t done = nullptr) const;
+};
+
+template<typename... Owned, typename... Get, typename... Exclude>
+inline cuda_group<owned_t<Owned...>, get_t<Get...>, exclude_t<Exclude...>> cuda_registry::group(get_t<Get...>, exclude_t<Exclude...>) {
+    if constexpr(sizeof...(Owned) != 0u) {
+        ENTT_ASSERT(!(owned_types.contains(type_hash<std::remove_const_t<Owned>>::value()) || ...), "Conflicting groups");
+    }
+
+    auto owned = std::make_tuple(static_cast<cuda_storage<std::remove_const_t<Owned>> *>(&pool<std::remove_const_t<Owned>>())...);
+    auto get = std::make_tuple(static_cast<cuda_storage<std::remove_const_t<Get>> *>(&pool<std::remove_const_t<Get>>())...);
+    std::vector<internal::cuda_pool_base *> exclude{static_cast<internal::cuda_pool_base *>(&pool<std::remove_const_t<Exclude>>())...};
+
+    if constexpr(sizeof...(Owned) != 0u) {
+        (owned_types.insert(type_hash<std::remove_const_t<Owned>>::value()), ...);
+    }
+
+    if constexpr(sizeof...(Owned) == 0u) {
+        return cuda_group<owned_t<>, get_t<Get...>, exclude_t<Exclude...>>{this, get, std::move(exclude)};
+    } else {
+        return cuda_group<owned_t<Owned...>, get_t<Get...>, exclude_t<Exclude...>>{this, owned, get, std::move(exclude), nullptr};
+    }
+}
+
+template<typename... Owned, typename... Get, typename... Exclude>
+inline cuda_group<owned_t<>, get_t<const Owned..., const Get...>, exclude_t<const Exclude...>> cuda_registry::group_if_exists(get_t<Get...>, exclude_t<Exclude...>) const {
+    auto get = std::make_tuple(static_cast<cuda_storage<std::remove_const_t<Owned>> *>(const_cast<cuda_storage<std::remove_const_t<Owned>> *>(find_pool<std::remove_const_t<Owned>>()))...,
+                               static_cast<cuda_storage<std::remove_const_t<Get>> *>(const_cast<cuda_storage<std::remove_const_t<Get>> *>(find_pool<std::remove_const_t<Get>>()))...);
+    std::vector<internal::cuda_pool_base *> exclude{const_cast<internal::cuda_pool_base *>(static_cast<const internal::cuda_pool_base *>(find_pool<std::remove_const_t<Exclude>>()))...};
+
+    return cuda_group<owned_t<>, get_t<const Owned..., const Get...>, exclude_t<const Exclude...>>{const_cast<cuda_registry *>(this), get, std::move(exclude)};
+}
+
+template<typename... Type>
+inline cudaError_t cuda_registry::compact(cudaStream_t stream, cudaEvent_t done) {
+    if(const auto err = fault; err != cudaSuccess) {
+        return err;
+    }
+
+    // Swap-and-pop pools have no tombstones, so compact is a no-op.
+    if(const auto err = record_done(done, stream); err != cudaSuccess) {
+        return fail(err);
+    }
+
+    return cudaSuccess;
+}
+
 #ifdef __CUDACC__
+
+template<typename... Get, typename... Exclude>
+template<typename Func>
+cudaError_t cuda_group<owned_t<>, get_t<Get...>, exclude_t<Exclude...>>::each(Func fn, cudaStream_t stream, cudaEvent_t done) const {
+    return [&]<std::size_t... Index>(std::index_sequence<Index...>) {
+        if(const auto err = registry->fault; err != cudaSuccess) {
+            return err;
+        }
+
+        const entity *candidate{};
+
+        if(const auto err = registry->upload_list(members.data(), members.size(), candidate, stream); err != cudaSuccess) {
+            return registry->fail(err);
+        }
+
+        using types = std::tuple<Get...>;
+        auto reqs = std::make_tuple(internal::cuda_dispatch_pool<std::tuple_element_t<Index, types>>{std::get<Index>(get_storages)->pages(), std::get<Index>(get_storages)->template payload_device<std::tuple_element_t<Index, types>>()}...);
+
+        internal::cuda_exclude_params excluded{};
+        excluded.count = std::min(excluded_pools.size(), internal::cuda_max_exclude);
+
+        for(std::size_t pos = 0u; pos < excluded.count; ++pos) {
+            excluded.pages[pos] = excluded_pools[pos]->pages();
+        }
+
+        if(members.size() != 0u) {
+            const auto block = 256u;
+            const auto grid = static_cast<unsigned>((members.size() + block - 1u) / block);
+            internal::cuda_view_each_kernel<<<grid, block, 0, stream>>>(fn, members.size(), candidate, reqs, excluded);
+
+            if(const auto err = cudaGetLastError(); err != cudaSuccess) {
+                return registry->fail(err);
+            }
+        }
+
+        if(done != nullptr) {
+            if(const auto err = cudaEventRecord(done, stream); err != cudaSuccess) {
+                return registry->fail(err);
+            }
+        }
+
+        return cudaSuccess;
+    }(std::index_sequence_for<Get...>{});
+}
+
+template<typename... Owned, typename... Get, typename... Exclude>
+template<typename Func>
+cudaError_t cuda_group<owned_t<Owned...>, get_t<Get...>, exclude_t<Exclude...>>::each(Func fn, cudaStream_t stream, cudaEvent_t done) const {
+    return [&]<std::size_t... O, std::size_t... G>(std::index_sequence<O...>, std::index_sequence<G...>) {
+        if(const auto err = registry->fault; err != cudaSuccess) {
+            return err;
+        }
+
+        const auto *leading = std::get<0>(owned_storages);
+        const entity *candidate = leading->packed_device();
+
+        using owned_types = std::tuple<Owned...>;
+        using get_types = std::tuple<Get...>;
+
+        auto reqs = std::tuple_cat(
+            std::make_tuple(internal::cuda_dispatch_pool<std::tuple_element_t<O, owned_types>>{std::get<O>(owned_storages)->pages(), std::get<O>(owned_storages)->template payload_device<std::tuple_element_t<O, owned_types>>()}...),
+            std::make_tuple(internal::cuda_dispatch_pool<std::tuple_element_t<G, get_types>>{std::get<G>(get_storages)->pages(), std::get<G>(get_storages)->template payload_device<std::tuple_element_t<G, get_types>>()}...));
+
+        internal::cuda_exclude_params excluded{};
+        excluded.count = std::min(excluded_pools.size(), internal::cuda_max_exclude);
+
+        for(std::size_t pos = 0u; pos < excluded.count; ++pos) {
+            excluded.pages[pos] = excluded_pools[pos]->pages();
+        }
+
+        if(length != 0u) {
+            const auto block = 256u;
+            const auto grid = static_cast<unsigned>((length + block - 1u) / block);
+            internal::cuda_view_each_kernel<<<grid, block, 0, stream>>>(fn, length, candidate, reqs, excluded);
+
+            if(const auto err = cudaGetLastError(); err != cudaSuccess) {
+                return registry->fail(err);
+            }
+        }
+
+        if(done != nullptr) {
+            if(const auto err = cudaEventRecord(done, stream); err != cudaSuccess) {
+                return registry->fail(err);
+            }
+        }
+
+        return cudaSuccess;
+    }(std::index_sequence_for<Owned...>{}, std::index_sequence_for<Get...>{});
+}
 
 template<typename Type, typename... Func>
 inline cudaError_t cuda_registry::patch_impl(const entity value, cudaStream_t stream, cudaEvent_t done, Func &&...func) {
