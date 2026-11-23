@@ -144,6 +144,81 @@ int main() {
         return 1;
     }
 
+    // Sorting (on a fresh registry, avoiding the owned pools above).
+    {
+        entt::cuda_registry sortable;
+        std::vector<entt::entity> entities;
+
+        for(std::size_t i = 0u; i < 10u; ++i) {
+            const auto entity = sortable.create();
+            entities.push_back(entity);
+
+            // Values are inserted in descending order.
+            if(!check(sortable.emplace<position>(entity, position{static_cast<float>(9u - i), 0.f, 0.f}), "sort emplace")) {
+                return 1;
+            }
+        }
+
+        check(cudaStreamSynchronize(nullptr), "sync sort setup");
+
+        // Value sort: ascending x.
+        if(!check(sortable.sort<position>([](const position &lhs, const position &rhs) { return lhs.x < rhs.x; }), "value sort")
+           || !check(cudaStreamSynchronize(nullptr), "sync value sort")) {
+            return 1;
+        }
+
+        auto &sorted_pool = sortable.storage<position>();
+
+        for(std::size_t i = 0u; i < 10u; ++i) {
+            if(!check(sortable.get<position>(sorted_pool.data()[i], pinned), "get after value sort")
+               || !check(cudaStreamSynchronize(nullptr), "sync get after value sort")) {
+                return 1;
+            }
+
+            if(pinned->x != static_cast<float>(i)) {
+                std::fprintf(stderr, "value sort order mismatch at %zu: %f\n", i, pinned->x);
+                return 1;
+            }
+        }
+
+        // Entity sort: ascending identifier.
+        if(!check(sortable.sort<position>([](const entt::entity lhs, const entt::entity rhs) { return lhs < rhs; }), "entity sort")
+           || !check(cudaStreamSynchronize(nullptr), "sync entity sort")) {
+            return 1;
+        }
+
+        for(std::size_t i = 0u; i < 10u; ++i) {
+            if(sorted_pool.data()[i] != entities[i]) {
+                std::fprintf(stderr, "entity sort order mismatch at %zu\n", i);
+                return 1;
+            }
+        }
+
+        // sort<To, From>: align position to velocity's order.
+        entt::cuda_registry aligned;
+        const auto a = aligned.create();
+        const auto b = aligned.create();
+        const auto c = aligned.create();
+
+        if(!check(aligned.emplace<position>(a, position{0.f, 0.f, 0.f}), "align emplace position a")
+           || !check(aligned.emplace<position>(b, position{1.f, 0.f, 0.f}), "align emplace position b")
+           || !check(aligned.emplace<position>(c, position{2.f, 0.f, 0.f}), "align emplace position c")
+           || !check(aligned.emplace<velocity>(c, velocity{}), "align emplace velocity c")
+           || !check(aligned.emplace<velocity>(b, velocity{}), "align emplace velocity b")
+           || !check(aligned.emplace<velocity>(a, velocity{}), "align emplace velocity a")
+           || !check(aligned.sort<position, velocity>(), "align sort")
+           || !check(cudaStreamSynchronize(nullptr), "sync align sort")) {
+            return 1;
+        }
+
+        auto &aligned_pool = aligned.storage<position>();
+
+        if(aligned_pool.data()[0] != c || aligned_pool.data()[1] != b || aligned_pool.data()[2] != a) {
+            std::fprintf(stderr, "sort<To, From> alignment mismatch\n");
+            return 1;
+        }
+    }
+
     std::puts("registry group tests passed.");
     check(cudaFreeHost(pinned), "pinned free");
     return 0;

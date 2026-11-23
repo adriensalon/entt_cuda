@@ -3,13 +3,13 @@
 An EnTT-style CUDA registry with host-owned identity/structure and GPU-authoritative
 component values.
 
-**Current status: phase 4 (groups/order/policies) implemented.** Phases 1-3
-delivered the asynchronous core, registry breadth, and query/storage breadth.
-Phase 4 adds non-owning groups (cached matching entities), owning groups (owned
-pools arranged for aligned permutations with CPU/GPU slot agreement), `owned`,
-`group_if_exists`, and `compact`. Value/order `sort` and signal-driven incremental
-group maintenance stay pending, as do the later gates (reactivity, persistence,
-allocator customization).
+**Current status: phase 4 (groups/order/policies) complete.** Phases 1-3 delivered
+the asynchronous core, registry breadth, and query/storage breadth. Phase 4 adds
+non-owning groups (cached matching entities), owning groups (owned pools arranged
+for aligned permutations with CPU/GPU slot agreement), `owned`, `group_if_exists`,
+`compact`, and entity/value `sort` plus `sort<To, From>`. Signal-driven
+incremental group maintenance stays pending, as do the later gates (reactivity,
+persistence, allocator customization).
 
 The compatibility reference is EnTT revision
 `1dcd7aab6548786f7672ff578639188bd2f0d837` (declaring 4.1.0). The submodule is
@@ -88,7 +88,7 @@ python tools/check-format.py --fix     # rewrite in place
   runtime view dispatching entity identifiers.
 - `registry_group.cu` exercises the phase-4 surface: non-owning and owning groups,
   aligned permutations with CPU/GPU slot agreement, `owned`, `group_if_exists`,
-  and `compact`.
+  `compact`, entity/value `sort`, and `sort<To, From>`.
 - `toolchain.cu` keeps the standalone extended-lambda and pinned transfer smoke
   test as a driver/runtime canary.
 

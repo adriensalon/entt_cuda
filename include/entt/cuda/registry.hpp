@@ -410,6 +410,14 @@ struct cuda_registry {
     template<typename... Type>
     cudaError_t compact(cudaStream_t stream = nullptr, cudaEvent_t done = nullptr);
 
+    /*! @brief Sorts a pool by an entity or value comparator. */
+    template<typename Type, typename Compare>
+    cudaError_t sort(Compare compare, cudaStream_t stream = nullptr, cudaEvent_t done = nullptr);
+
+    /*! @brief Aligns a pool's order to another pool's order. */
+    template<typename To, typename From>
+    cudaError_t sort(cudaStream_t stream = nullptr, cudaEvent_t done = nullptr);
+
     template<typename Type>
     requires internal::cuda_component<Type>
     [[nodiscard]] cuda_storage<Type> &storage(const id_type id = type_hash<Type>::value()) {
@@ -1517,6 +1525,81 @@ inline cudaError_t cuda_registry::compact(cudaStream_t stream, cudaEvent_t done)
     // Swap-and-pop pools have no tombstones, so compact is a no-op.
     if(const auto err = record_done(done, stream); err != cudaSuccess) {
         return fail(err);
+    }
+
+    return cudaSuccess;
+}
+
+template<typename Type, typename Compare>
+inline cudaError_t cuda_registry::sort(Compare compare, cudaStream_t stream, cudaEvent_t done) {
+    if(const auto err = fault; err != cudaSuccess) {
+        return err;
+    }
+
+    if(owned<Type>()) {
+        return cudaErrorInvalidValue;
+    }
+
+    auto &component = pool<Type>();
+    cudaError_t err;
+
+    if constexpr(!std::is_empty_v<Type> && std::is_invocable_v<Compare, const Type &, const Type &>) {
+        err = component.sort_values(std::move(compare), stream);
+    } else {
+        err = component.sort_entities(std::move(compare), stream);
+    }
+
+    if(err != cudaSuccess) {
+        return fail(err);
+    }
+
+    if(const auto curr = record_done(done, stream); curr != cudaSuccess) {
+        return fail(curr);
+    }
+
+    return cudaSuccess;
+}
+
+template<typename To, typename From>
+inline cudaError_t cuda_registry::sort(cudaStream_t stream, cudaEvent_t done) {
+    if(const auto err = fault; err != cudaSuccess) {
+        return err;
+    }
+
+    if(owned<To>()) {
+        return cudaErrorInvalidValue;
+    }
+
+    auto &to_pool = pool<To>();
+    const auto *from_pool = find_pool<From>();
+
+    std::vector<std::size_t> perm(to_pool.size());
+    std::size_t next = 0u;
+
+    if(from_pool != nullptr) {
+        for(std::size_t pos = 0u; pos < from_pool->size(); ++pos) {
+            const entity value = from_pool->data()[pos];
+
+            if(to_pool.contains(value)) {
+                perm[next++] = to_pool.index(value);
+            }
+        }
+    }
+
+    for(std::size_t pos = 0u; pos < to_pool.size(); ++pos) {
+        const entity value = to_pool.data()[pos];
+
+        if(from_pool == nullptr || !from_pool->contains(value)) {
+            perm[next++] = pos;
+        }
+    }
+
+    if(const auto err = to_pool.reorder(perm, stream); err != cudaSuccess) {
+        return fail(err);
+    }
+
+    if(const auto curr = record_done(done, stream); curr != cudaSuccess) {
+        return fail(curr);
     }
 
     return cudaSuccess;

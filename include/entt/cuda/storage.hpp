@@ -1,10 +1,12 @@
 #ifndef ENTT_CUDA_STORAGE_HPP
 #define ENTT_CUDA_STORAGE_HPP
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
 #include <memory>
+#include <numeric>
 #include <utility>
 #include <vector>
 #include <cuda_runtime_api.h>
@@ -533,6 +535,81 @@ public:
         }
 
         return err;
+    }
+
+    /*! @brief Reorders the dense slots by a permutation, mirroring the device. */
+    cudaError_t reorder(const std::vector<std::size_t> &perm, cudaStream_t stream) {
+        const auto n = count;
+
+        std::vector<Type> old_values;
+
+        if constexpr(has_value) {
+            old_values.resize(n);
+
+            if(n != 0u) {
+                cudaMemcpy(old_values.data(), d_payload, n * sizeof(Type), cudaMemcpyDeviceToHost);
+            }
+        }
+
+        std::vector<entity> ordered(n);
+
+        for(std::size_t pos = 0u; pos < n; ++pos) {
+            ordered[pos] = packed[perm[pos]];
+        }
+
+        packed = std::move(ordered);
+
+        for(std::size_t pos = 0u; pos < n; ++pos) {
+            sparse[static_cast<std::size_t>(traits_type::to_entity(packed[pos]))] = internal::cuda_combine(pos, packed[pos]);
+        }
+
+        cudaError_t err = cudaSuccess;
+
+        if(n != 0u) {
+            err = cudaMemcpyAsync(d_packed, packed.data(), n * sizeof(entity), cudaMemcpyHostToDevice, stream);
+
+            if constexpr(has_value) {
+                std::vector<Type> values(n);
+
+                for(std::size_t pos = 0u; pos < n; ++pos) {
+                    values[pos] = old_values[perm[pos]];
+                }
+
+                if(err == cudaSuccess) {
+                    err = cudaMemcpyAsync(d_payload, values.data(), n * sizeof(Type), cudaMemcpyHostToDevice, stream);
+                }
+            }
+
+            for(std::size_t pos = 0u; pos < n && err == cudaSuccess; ++pos) {
+                err = write_sparse_cell(packed[pos], internal::cuda_combine(pos, packed[pos]), stream);
+            }
+        }
+
+        return err;
+    }
+
+    /*! @brief Sorts the dense entities by an entity comparator. */
+    template<typename Compare>
+    cudaError_t sort_entities(Compare compare, cudaStream_t stream) {
+        std::vector<std::size_t> perm(count);
+        std::iota(perm.begin(), perm.end(), 0u);
+        std::sort(perm.begin(), perm.end(), [&](const std::size_t lhs, const std::size_t rhs) { return compare(packed[lhs], packed[rhs]); });
+        return reorder(perm, stream);
+    }
+
+    /*! @brief Sorts the dense entities by a value comparator, downloading values. */
+    template<typename Compare>
+    cudaError_t sort_values(Compare compare, cudaStream_t stream) {
+        std::vector<Type> values(count);
+
+        if(count != 0u) {
+            cudaMemcpy(values.data(), d_payload, count * sizeof(Type), cudaMemcpyDeviceToHost);
+        }
+
+        std::vector<std::size_t> perm(count);
+        std::iota(perm.begin(), perm.end(), 0u);
+        std::sort(perm.begin(), perm.end(), [&](const std::size_t lhs, const std::size_t rhs) { return compare(values[lhs], values[rhs]); });
+        return reorder(perm, stream);
     }
 
     cudaError_t enqueue_remove(const entity value, cudaStream_t stream) override {
