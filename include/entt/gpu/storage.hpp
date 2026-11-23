@@ -1,5 +1,5 @@
-#ifndef ENTT_CUDA_STORAGE_HPP
-#define ENTT_CUDA_STORAGE_HPP
+#ifndef ENTT_GPU_STORAGE_HPP
+#define ENTT_GPU_STORAGE_HPP
 
 #include <algorithm>
 #include <cstddef>
@@ -9,7 +9,6 @@
 #include <numeric>
 #include <utility>
 #include <vector>
-#include <cuda_runtime_api.h>
 #include <entt/core/type_info.hpp>
 #include <entt/entity/entity.hpp>
 #include "contract.hpp"
@@ -27,31 +26,32 @@ namespace internal {
  * reaches the recorded event. The registry reclaims them opportunistically and
  * drains the remainder during teardown.
  */
-class cuda_retirement {
+template<typename Backend>
+class gpu_retirement {
     struct entry {
         void *ptr;
-        cudaEvent_t event;
+        typename Backend::event_type event;
     };
 
     std::vector<entry> retired;
 
 public:
-    cuda_retirement() = default;
-    cuda_retirement(const cuda_retirement &) = delete;
-    cuda_retirement(cuda_retirement &&) noexcept = default;
-    cuda_retirement &operator=(const cuda_retirement &) = delete;
-    cuda_retirement &operator=(cuda_retirement &&) noexcept = default;
+    gpu_retirement() = default;
+    gpu_retirement(const gpu_retirement &) = delete;
+    gpu_retirement(gpu_retirement &&) noexcept = default;
+    gpu_retirement &operator=(const gpu_retirement &) = delete;
+    gpu_retirement &operator=(gpu_retirement &&) noexcept = default;
 
     /*! @brief Retires a device allocation after the stream reaches this point. */
-    void retire(void *ptr, cudaStream_t stream) {
+    void retire(void *ptr, typename Backend::stream_type stream) {
         if(ptr == nullptr) {
             return;
         }
 
-        cudaEvent_t event{};
+        typename Backend::event_type event{};
 
-        if(cudaEventCreateWithFlags(&event, cudaEventDisableTiming) == cudaSuccess) {
-            cudaEventRecord(event, stream);
+        if(Backend::event_create(&event, Backend::event_disable_timing) == Backend::success) {
+            Backend::event_record(event, stream);
         }
 
         // A null event keeps the allocation until drain, a conservative fallback.
@@ -61,9 +61,9 @@ public:
     /*! @brief Frees retired allocations whose events have completed. */
     void reclaim() noexcept {
         for(auto it = retired.begin(); it != retired.end();) {
-            if(it->event != nullptr && cudaEventQuery(it->event) == cudaSuccess) {
-                cudaFree(it->ptr);
-                cudaEventDestroy(it->event);
+            if(it->event != nullptr && Backend::event_query(it->event) == Backend::success) {
+                Backend::free(it->ptr);
+                Backend::event_destroy(it->event);
                 it = retired.erase(it);
             } else {
                 ++it;
@@ -75,12 +75,12 @@ public:
     void drain() noexcept {
         for(auto &&elem: retired) {
             if(elem.event != nullptr) {
-                cudaEventSynchronize(elem.event);
-                cudaEventDestroy(elem.event);
+                Backend::event_synchronize(elem.event);
+                Backend::event_destroy(elem.event);
             }
 
             if(elem.ptr != nullptr) {
-                cudaFree(elem.ptr);
+                Backend::free(elem.ptr);
             }
         }
 
@@ -95,9 +95,9 @@ public:
  * Entity from every pool without knowing each component type.
  * @tparam Entity Underlying entity identifier.
  */
-template<typename Entity = entity>
-struct cuda_pool_base {
-    virtual ~cuda_pool_base() = default;
+template<typename Entity, typename Backend>
+struct gpu_pool_base {
+    virtual ~gpu_pool_base() = default;
 
     [[nodiscard]] virtual std::size_t size() const noexcept = 0;
     [[nodiscard]] virtual bool empty() const noexcept = 0;
@@ -108,16 +108,16 @@ struct cuda_pool_base {
     [[nodiscard]] virtual id_type type() const noexcept = 0;
 
     /*! @brief Enqueues a tolerant swap-and-pop removal; a no-op if absent. */
-    virtual cudaError_t enqueue_remove(const Entity value, cudaStream_t stream) = 0;
+    virtual typename Backend::error_type enqueue_remove(const Entity value, typename Backend::stream_type stream) = 0;
 
     /*! @brief Clears every member; host-only, no device submission. */
     virtual void clear() noexcept = 0;
 
     /*! @brief Retires every live device allocation after the stream completes. */
-    virtual void reset(cudaStream_t stream) noexcept = 0;
+    virtual void reset(typename Backend::stream_type stream) noexcept = 0;
 
     /*! @brief Re-points internal bookkeeping after the registry is moved. */
-    virtual void rebind_retirement(cuda_retirement &retire) noexcept = 0;
+    virtual void rebind_retirement(gpu_retirement<Backend> &retire) noexcept = 0;
 
     /*! @brief Frees every live device allocation (called after teardown drain). */
     virtual void release() noexcept = 0;
@@ -129,7 +129,7 @@ struct cuda_pool_base {
 
 /*! @brief Forward iterator over a pool map yielding (id, pool reference) pairs. */
 template<typename It, typename Pool>
-class cuda_pool_iterator {
+class gpu_pool_iterator {
     It it;
 
 public:
@@ -139,51 +139,51 @@ public:
     using pointer = void;
     using difference_type = std::ptrdiff_t;
 
-    cuda_pool_iterator() = default;
-    explicit cuda_pool_iterator(It curr) noexcept
+    gpu_pool_iterator() = default;
+    explicit gpu_pool_iterator(It curr) noexcept
         : it{curr} {}
 
     [[nodiscard]] value_type operator*() const noexcept {
         return {it->first, *it->second};
     }
 
-    cuda_pool_iterator &operator++() noexcept {
+    gpu_pool_iterator &operator++() noexcept {
         ++it;
         return *this;
     }
 
-    cuda_pool_iterator operator++(int) noexcept {
-        cuda_pool_iterator copy = *this;
+    gpu_pool_iterator operator++(int) noexcept {
+        gpu_pool_iterator copy = *this;
         ++(*this);
         return copy;
     }
 
-    [[nodiscard]] bool operator==(const cuda_pool_iterator &other) const noexcept {
+    [[nodiscard]] bool operator==(const gpu_pool_iterator &other) const noexcept {
         return it == other.it;
     }
 
-    [[nodiscard]] bool operator!=(const cuda_pool_iterator &other) const noexcept {
+    [[nodiscard]] bool operator!=(const gpu_pool_iterator &other) const noexcept {
         return it != other.it;
     }
 };
 
 /*! @brief A lightweight range over a pool map. */
 template<typename It, typename Pool>
-class cuda_pool_range {
+class gpu_pool_range {
     It first;
     It last;
 
 public:
-    cuda_pool_range(It begin, It end) noexcept
+    gpu_pool_range(It begin, It end) noexcept
         : first{begin},
           last{end} {}
 
-    [[nodiscard]] cuda_pool_iterator<It, Pool> begin() const noexcept {
-        return cuda_pool_iterator<It, Pool>{first};
+    [[nodiscard]] gpu_pool_iterator<It, Pool> begin() const noexcept {
+        return gpu_pool_iterator<It, Pool>{first};
     }
 
-    [[nodiscard]] cuda_pool_iterator<It, Pool> end() const noexcept {
-        return cuda_pool_iterator<It, Pool>{last};
+    [[nodiscard]] gpu_pool_iterator<It, Pool> end() const noexcept {
+        return gpu_pool_iterator<It, Pool>{last};
     }
 };
 
@@ -195,8 +195,8 @@ public:
  * @tparam Type Component type, unqualified and non-const.
  * @tparam Entity Underlying entity identifier.
  */
-template<typename Type, typename Entity = entity>
-class cuda_storage final: public internal::cuda_pool_base<Entity> {
+template<typename Type, typename Entity, typename Backend>
+class gpu_storage final: public internal::gpu_pool_base<Entity, Backend> {
     using traits_type = entt_traits<Entity>;
     static constexpr bool has_value = !std::is_empty_v<Type>;
 
@@ -210,7 +210,7 @@ class cuda_storage final: public internal::cuda_pool_base<Entity> {
     std::size_t count{};
     std::size_t reserved{};
 
-    internal::cuda_retirement *retirement;
+    internal::gpu_retirement<Backend> *retirement;
 
     [[nodiscard]] std::size_t index_of(const Entity value) const noexcept {
         return static_cast<std::size_t>(traits_type::to_entity(sparse[static_cast<std::size_t>(traits_type::to_entity(value))]));
@@ -218,43 +218,43 @@ class cuda_storage final: public internal::cuda_pool_base<Entity> {
 
     void ensure_host_sparse(const std::size_t raw) {
         if(raw >= sparse.size()) {
-            sparse.resize(raw + 1u, internal::cuda_null_entity<Entity>);
+            sparse.resize(raw + 1u, internal::gpu_null_entity<Entity>);
         }
     }
 
-    cudaError_t ensure_page(const std::size_t page, cudaStream_t stream) {
+    typename Backend::error_type ensure_page(const std::size_t page, typename Backend::stream_type stream) {
         if(d_pages == nullptr) {
             void *directory{};
 
-            if(cudaMalloc(&directory, internal::cuda_sparse_page_count<Entity> * sizeof(Entity *)) != cudaSuccess) {
-                return cudaErrorMemoryAllocation;
+            if(Backend::malloc(&directory, internal::gpu_sparse_page_count<Entity> * sizeof(Entity *)) != Backend::success) {
+                return Backend::out_of_memory;
             }
 
             d_pages = static_cast<Entity **>(directory);
-            pages_host.assign(internal::cuda_sparse_page_count<Entity>, nullptr);
-            cudaMemsetAsync(d_pages, 0, internal::cuda_sparse_page_count<Entity> * sizeof(Entity *), stream);
+            pages_host.assign(internal::gpu_sparse_page_count<Entity>, nullptr);
+            Backend::memset_async(d_pages, 0, internal::gpu_sparse_page_count<Entity> * sizeof(Entity *), stream);
         }
 
         if(pages_host[page] == nullptr) {
             void *raw{};
 
-            if(cudaMalloc(&raw, internal::cuda_sparse_page<Entity> * sizeof(Entity)) != cudaSuccess) {
-                return cudaErrorMemoryAllocation;
+            if(Backend::malloc(&raw, internal::gpu_sparse_page<Entity> * sizeof(Entity)) != Backend::success) {
+                return Backend::out_of_memory;
             }
 
             auto *page_ptr = static_cast<Entity *>(raw);
             pages_host[page] = page_ptr;
             // Every byte set to 0xFF makes each cell the all-ones null identifier.
-            cudaMemsetAsync(page_ptr, 0xFF, internal::cuda_sparse_page<Entity> * sizeof(Entity), stream);
-            cudaMemcpyAsync(&d_pages[page], &pages_host[page], sizeof(Entity *), cudaMemcpyHostToDevice, stream);
+            Backend::memset_async(page_ptr, 0xFF, internal::gpu_sparse_page<Entity> * sizeof(Entity), stream);
+            Backend::memcpy_async(&d_pages[page], &pages_host[page], sizeof(Entity *), Backend::host_to_device, stream);
         }
 
-        return cudaSuccess;
+        return Backend::success;
     }
 
-    cudaError_t grow(const std::size_t required, cudaStream_t stream) {
+    typename Backend::error_type grow(const std::size_t required, typename Backend::stream_type stream) {
         if(required <= reserved) {
-            return cudaSuccess;
+            return Backend::success;
         }
 
         std::size_t next = (reserved == 0u) ? 1u : reserved;
@@ -266,14 +266,14 @@ class cuda_storage final: public internal::cuda_pool_base<Entity> {
         void *raw_packed{};
         void *raw_payload{};
 
-        if(cudaMalloc(&raw_packed, next * sizeof(Entity)) != cudaSuccess) {
-            return cudaErrorMemoryAllocation;
+        if(Backend::malloc(&raw_packed, next * sizeof(Entity)) != Backend::success) {
+            return Backend::out_of_memory;
         }
 
         if constexpr(has_value) {
-            if(cudaMalloc(&raw_payload, next * sizeof(Type)) != cudaSuccess) {
-                cudaFree(raw_packed);
-                return cudaErrorMemoryAllocation;
+            if(Backend::malloc(&raw_payload, next * sizeof(Type)) != Backend::success) {
+                Backend::free(raw_packed);
+                return Backend::out_of_memory;
             }
         }
 
@@ -281,10 +281,10 @@ class cuda_storage final: public internal::cuda_pool_base<Entity> {
         auto *next_payload = static_cast<Type *>(raw_payload);
 
         if(count != 0u) {
-            cudaMemcpyAsync(next_packed, d_packed, count * sizeof(Entity), cudaMemcpyDeviceToDevice, stream);
+            Backend::memcpy_async(next_packed, d_packed, count * sizeof(Entity), Backend::device_to_device, stream);
 
             if constexpr(has_value) {
-                cudaMemcpyAsync(next_payload, d_payload, count * sizeof(Type), cudaMemcpyDeviceToDevice, stream);
+                Backend::memcpy_async(next_payload, d_payload, count * sizeof(Type), Backend::device_to_device, stream);
             }
         }
 
@@ -298,35 +298,35 @@ class cuda_storage final: public internal::cuda_pool_base<Entity> {
         d_payload = next_payload;
         reserved = next;
 
-        return cudaSuccess;
+        return Backend::success;
     }
 
-    cudaError_t write_sparse_cell(const Entity value, const Entity cell, cudaStream_t stream) {
+    typename Backend::error_type write_sparse_cell(const Entity value, const Entity cell, typename Backend::stream_type stream) {
         const auto raw = static_cast<std::size_t>(traits_type::to_entity(value));
-        const auto page = raw / internal::cuda_sparse_page<Entity>;
-        const auto offset = raw % internal::cuda_sparse_page<Entity>;
+        const auto page = raw / internal::gpu_sparse_page<Entity>;
+        const auto offset = raw % internal::gpu_sparse_page<Entity>;
 
-        if(const auto err = ensure_page(page, stream); err != cudaSuccess) {
+        if(const auto err = ensure_page(page, stream); err != Backend::success) {
             return err;
         }
 
-        return cudaMemcpyAsync(pages_host[page] + offset, &cell, sizeof(Entity), cudaMemcpyHostToDevice, stream);
+        return Backend::memcpy_async(pages_host[page] + offset, &cell, sizeof(Entity), Backend::host_to_device, stream);
     }
 
 public:
-    explicit cuda_storage(internal::cuda_retirement &other) noexcept
+    explicit gpu_storage(internal::gpu_retirement<Backend> &other) noexcept
         : retirement{&other} {}
 
-    cuda_storage(const cuda_storage &) = delete;
-    cuda_storage(cuda_storage &&) = delete;
-    cuda_storage &operator=(const cuda_storage &) = delete;
-    cuda_storage &operator=(cuda_storage &&) = delete;
+    gpu_storage(const gpu_storage &) = delete;
+    gpu_storage(gpu_storage &&) = delete;
+    gpu_storage &operator=(const gpu_storage &) = delete;
+    gpu_storage &operator=(gpu_storage &&) = delete;
 
-    ~cuda_storage() override {
+    ~gpu_storage() override {
         release();
     }
 
-    void rebind_retirement(internal::cuda_retirement &other) noexcept override {
+    void rebind_retirement(internal::gpu_retirement<Backend> &other) noexcept override {
         retirement = &other;
     }
 
@@ -348,7 +348,7 @@ public:
 
     [[nodiscard]] bool contains(const Entity value) const noexcept override {
         const auto raw = static_cast<std::size_t>(traits_type::to_entity(value));
-        return raw < sparse.size() && sparse[raw] != internal::cuda_null_entity<Entity> && traits_type::to_version(sparse[raw]) == traits_type::to_version(value);
+        return raw < sparse.size() && sparse[raw] != internal::gpu_null_entity<Entity> && traits_type::to_version(sparse[raw]) == traits_type::to_version(value);
     }
 
     [[nodiscard]] const Entity *packed_device() const noexcept override {
@@ -392,7 +392,7 @@ public:
     void download(Type *dst) const {
         if constexpr(has_value) {
             if(count != 0u) {
-                cudaMemcpy(dst, d_payload, count * sizeof(Type), cudaMemcpyDeviceToHost);
+                Backend::memcpy(dst, d_payload, count * sizeof(Type), Backend::device_to_host);
             }
         }
     }
@@ -405,7 +405,7 @@ public:
     }
 
     /*! @brief Retires every live device allocation after the stream completes. */
-    void reset(cudaStream_t stream) noexcept override {
+    void reset(typename Backend::stream_type stream) noexcept override {
         retirement->retire(d_packed, stream);
 
         if constexpr(has_value) {
@@ -431,41 +431,41 @@ public:
 
     /*! @brief Constructs the component on the host and enqueues its upload. */
     template<typename... Args>
-    cudaError_t emplace(const Entity value, cudaStream_t stream, Args &&...args) {
+    typename Backend::error_type emplace(const Entity value, typename Backend::stream_type stream, Args &&...args) {
         // Construction precedes any logical mutation; exceptions propagate.
         Type staged{std::forward<Args>(args)...};
 
         const auto pos = count;
 
-        if(const auto err = grow(pos + 1u, stream); err != cudaSuccess) {
+        if(const auto err = grow(pos + 1u, stream); err != Backend::success) {
             return err;
         }
 
         const auto raw = static_cast<std::size_t>(traits_type::to_entity(value));
-        const auto page = raw / internal::cuda_sparse_page<Entity>;
+        const auto page = raw / internal::gpu_sparse_page<Entity>;
 
-        if(const auto err = ensure_page(page, stream); err != cudaSuccess) {
+        if(const auto err = ensure_page(page, stream); err != Backend::success) {
             return err;
         }
 
         // Commit host metadata only after every allocation has succeeded.
-        const auto cell = internal::cuda_combine<Entity>(pos, value);
+        const auto cell = internal::gpu_combine<Entity>(pos, value);
         ensure_host_sparse(raw);
         sparse[raw] = cell;
         packed.push_back(value);
         count = pos + 1u;
 
-        cudaError_t err = cudaSuccess;
+        typename Backend::error_type err = Backend::success;
 
         if constexpr(has_value) {
-            err = cudaMemcpyAsync(d_payload + pos, std::addressof(staged), sizeof(Type), cudaMemcpyHostToDevice, stream);
+            err = Backend::memcpy_async(d_payload + pos, std::addressof(staged), sizeof(Type), Backend::host_to_device, stream);
         }
 
-        if(err == cudaSuccess) {
-            err = cudaMemcpyAsync(d_packed + pos, &value, sizeof(Entity), cudaMemcpyHostToDevice, stream);
+        if(err == Backend::success) {
+            err = Backend::memcpy_async(d_packed + pos, &value, sizeof(Entity), Backend::host_to_device, stream);
         }
 
-        if(err == cudaSuccess) {
+        if(err == Backend::success) {
             err = write_sparse_cell(value, cell, stream);
         }
 
@@ -473,33 +473,33 @@ public:
     }
 
     /*! @brief Enqueues a device-to-host download of the component value. */
-    cudaError_t enqueue_get(const Entity value, Type *dst, cudaStream_t stream) const {
+    typename Backend::error_type enqueue_get(const Entity value, Type *dst, typename Backend::stream_type stream) const {
         const auto pos = index_of(value);
-        return cudaMemcpyAsync(dst, d_payload + pos, sizeof(Type), cudaMemcpyDeviceToHost, stream);
+        return Backend::memcpy_async(dst, d_payload + pos, sizeof(Type), Backend::device_to_host, stream);
     }
 
     /*! @brief Enqueues a host-to-device upload of the component value. */
-    cudaError_t enqueue_assign(const Entity value, const Type *src, cudaStream_t stream) {
+    typename Backend::error_type enqueue_assign(const Entity value, const Type *src, typename Backend::stream_type stream) {
         const auto pos = index_of(value);
-        return cudaMemcpyAsync(d_payload + pos, src, sizeof(Type), cudaMemcpyHostToDevice, stream);
+        return Backend::memcpy_async(d_payload + pos, src, sizeof(Type), Backend::host_to_device, stream);
     }
 
     /*! @brief Constructs a replacement value on the host and uploads it in place. */
     template<typename... Args>
-    cudaError_t replace(const Entity value, cudaStream_t stream, Args &&...args) {
+    typename Backend::error_type replace(const Entity value, typename Backend::stream_type stream, Args &&...args) {
         if constexpr(has_value) {
             Type staged{std::forward<Args>(args)...};
             const auto pos = index_of(value);
-            return cudaMemcpyAsync(d_payload + pos, std::addressof(staged), sizeof(Type), cudaMemcpyHostToDevice, stream);
+            return Backend::memcpy_async(d_payload + pos, std::addressof(staged), sizeof(Type), Backend::host_to_device, stream);
         } else {
-            return cudaSuccess;
+            return Backend::success;
         }
     }
 
     /*! @brief Swaps two dense slots, reordering host and device state together. */
-    cudaError_t swap_elements(const std::size_t lhs, const std::size_t rhs, cudaStream_t stream) {
+    typename Backend::error_type swap_elements(const std::size_t lhs, const std::size_t rhs, typename Backend::stream_type stream) {
         if(lhs == rhs) {
-            return cudaSuccess;
+            return Backend::success;
         }
 
         const Entity lhs_entity = packed[lhs];
@@ -507,50 +507,50 @@ public:
 
         packed[lhs] = rhs_entity;
         packed[rhs] = lhs_entity;
-        sparse[static_cast<std::size_t>(traits_type::to_entity(lhs_entity))] = internal::cuda_combine<Entity>(rhs, lhs_entity);
-        sparse[static_cast<std::size_t>(traits_type::to_entity(rhs_entity))] = internal::cuda_combine<Entity>(lhs, rhs_entity);
+        sparse[static_cast<std::size_t>(traits_type::to_entity(lhs_entity))] = internal::gpu_combine<Entity>(rhs, lhs_entity);
+        sparse[static_cast<std::size_t>(traits_type::to_entity(rhs_entity))] = internal::gpu_combine<Entity>(lhs, rhs_entity);
 
-        cudaError_t err = cudaSuccess;
-
-        if constexpr(has_value) {
-            if(d_scratch == nullptr && cudaMalloc(reinterpret_cast<void **>(&d_scratch), sizeof(Type)) != cudaSuccess) {
-                return cudaErrorMemoryAllocation;
-            }
-
-            err = cudaMemcpyAsync(d_scratch, d_payload + lhs, sizeof(Type), cudaMemcpyDeviceToDevice, stream);
-        }
-
-        if(err == cudaSuccess) {
-            err = cudaMemcpyAsync(d_packed + lhs, &rhs_entity, sizeof(Entity), cudaMemcpyHostToDevice, stream);
-        }
-
-        if(err == cudaSuccess) {
-            err = cudaMemcpyAsync(d_packed + rhs, &lhs_entity, sizeof(Entity), cudaMemcpyHostToDevice, stream);
-        }
+        typename Backend::error_type err = Backend::success;
 
         if constexpr(has_value) {
-            if(err == cudaSuccess) {
-                err = cudaMemcpyAsync(d_payload + lhs, d_payload + rhs, sizeof(Type), cudaMemcpyDeviceToDevice, stream);
+            if(d_scratch == nullptr && Backend::malloc(reinterpret_cast<void **>(&d_scratch), sizeof(Type)) != Backend::success) {
+                return Backend::out_of_memory;
             }
 
-            if(err == cudaSuccess) {
-                err = cudaMemcpyAsync(d_payload + rhs, d_scratch, sizeof(Type), cudaMemcpyDeviceToDevice, stream);
+            err = Backend::memcpy_async(d_scratch, d_payload + lhs, sizeof(Type), Backend::device_to_device, stream);
+        }
+
+        if(err == Backend::success) {
+            err = Backend::memcpy_async(d_packed + lhs, &rhs_entity, sizeof(Entity), Backend::host_to_device, stream);
+        }
+
+        if(err == Backend::success) {
+            err = Backend::memcpy_async(d_packed + rhs, &lhs_entity, sizeof(Entity), Backend::host_to_device, stream);
+        }
+
+        if constexpr(has_value) {
+            if(err == Backend::success) {
+                err = Backend::memcpy_async(d_payload + lhs, d_payload + rhs, sizeof(Type), Backend::device_to_device, stream);
+            }
+
+            if(err == Backend::success) {
+                err = Backend::memcpy_async(d_payload + rhs, d_scratch, sizeof(Type), Backend::device_to_device, stream);
             }
         }
 
-        if(err == cudaSuccess) {
-            err = write_sparse_cell(lhs_entity, internal::cuda_combine<Entity>(rhs, lhs_entity), stream);
+        if(err == Backend::success) {
+            err = write_sparse_cell(lhs_entity, internal::gpu_combine<Entity>(rhs, lhs_entity), stream);
         }
 
-        if(err == cudaSuccess) {
-            err = write_sparse_cell(rhs_entity, internal::cuda_combine<Entity>(lhs, rhs_entity), stream);
+        if(err == Backend::success) {
+            err = write_sparse_cell(rhs_entity, internal::gpu_combine<Entity>(lhs, rhs_entity), stream);
         }
 
         return err;
     }
 
     /*! @brief Reorders the dense slots by a permutation, mirroring the device. */
-    cudaError_t reorder(const std::vector<std::size_t> &perm, cudaStream_t stream) {
+    typename Backend::error_type reorder(const std::vector<std::size_t> &perm, typename Backend::stream_type stream) {
         const auto n = count;
 
         std::vector<Type> old_values;
@@ -559,7 +559,7 @@ public:
             old_values.resize(n);
 
             if(n != 0u) {
-                cudaMemcpy(old_values.data(), d_payload, n * sizeof(Type), cudaMemcpyDeviceToHost);
+                Backend::memcpy(old_values.data(), d_payload, n * sizeof(Type), Backend::device_to_host);
             }
         }
 
@@ -572,13 +572,13 @@ public:
         packed = std::move(ordered);
 
         for(std::size_t pos = 0u; pos < n; ++pos) {
-            sparse[static_cast<std::size_t>(traits_type::to_entity(packed[pos]))] = internal::cuda_combine<Entity>(pos, packed[pos]);
+            sparse[static_cast<std::size_t>(traits_type::to_entity(packed[pos]))] = internal::gpu_combine<Entity>(pos, packed[pos]);
         }
 
-        cudaError_t err = cudaSuccess;
+        typename Backend::error_type err = Backend::success;
 
         if(n != 0u) {
-            err = cudaMemcpyAsync(d_packed, packed.data(), n * sizeof(Entity), cudaMemcpyHostToDevice, stream);
+            err = Backend::memcpy_async(d_packed, packed.data(), n * sizeof(Entity), Backend::host_to_device, stream);
 
             if constexpr(has_value) {
                 std::vector<Type> values(n);
@@ -587,13 +587,13 @@ public:
                     values[pos] = old_values[perm[pos]];
                 }
 
-                if(err == cudaSuccess) {
-                    err = cudaMemcpyAsync(d_payload, values.data(), n * sizeof(Type), cudaMemcpyHostToDevice, stream);
+                if(err == Backend::success) {
+                    err = Backend::memcpy_async(d_payload, values.data(), n * sizeof(Type), Backend::host_to_device, stream);
                 }
             }
 
-            for(std::size_t pos = 0u; pos < n && err == cudaSuccess; ++pos) {
-                err = write_sparse_cell(packed[pos], internal::cuda_combine<Entity>(pos, packed[pos]), stream);
+            for(std::size_t pos = 0u; pos < n && err == Backend::success; ++pos) {
+                err = write_sparse_cell(packed[pos], internal::gpu_combine<Entity>(pos, packed[pos]), stream);
             }
         }
 
@@ -602,7 +602,7 @@ public:
 
     /*! @brief Sorts the dense entities by an Entity comparator. */
     template<typename Compare>
-    cudaError_t sort_entities(Compare compare, cudaStream_t stream) {
+    typename Backend::error_type sort_entities(Compare compare, typename Backend::stream_type stream) {
         std::vector<std::size_t> perm(count);
         std::iota(perm.begin(), perm.end(), 0u);
         std::sort(perm.begin(), perm.end(), [&](const std::size_t lhs, const std::size_t rhs) { return compare(packed[lhs], packed[rhs]); });
@@ -611,11 +611,11 @@ public:
 
     /*! @brief Sorts the dense entities by a value comparator, downloading values. */
     template<typename Compare>
-    cudaError_t sort_values(Compare compare, cudaStream_t stream) {
+    typename Backend::error_type sort_values(Compare compare, typename Backend::stream_type stream) {
         std::vector<Type> values(count);
 
         if(count != 0u) {
-            cudaMemcpy(values.data(), d_payload, count * sizeof(Type), cudaMemcpyDeviceToHost);
+            Backend::memcpy(values.data(), d_payload, count * sizeof(Type), Backend::device_to_host);
         }
 
         std::vector<std::size_t> perm(count);
@@ -624,9 +624,9 @@ public:
         return reorder(perm, stream);
     }
 
-    cudaError_t enqueue_remove(const Entity value, cudaStream_t stream) override {
+    typename Backend::error_type enqueue_remove(const Entity value, typename Backend::stream_type stream) override {
         if(!contains(value)) {
-            return cudaSuccess;
+            return Backend::success;
         }
         const auto pos = index_of(value);
         const auto last_pos = count - 1u;
@@ -634,31 +634,31 @@ public:
 
         if(pos != last_pos) {
             packed[pos] = last;
-            sparse[static_cast<std::size_t>(traits_type::to_entity(last))] = internal::cuda_combine<Entity>(pos, last);
+            sparse[static_cast<std::size_t>(traits_type::to_entity(last))] = internal::gpu_combine<Entity>(pos, last);
         }
 
-        sparse[static_cast<std::size_t>(traits_type::to_entity(value))] = internal::cuda_null_entity<Entity>;
+        sparse[static_cast<std::size_t>(traits_type::to_entity(value))] = internal::gpu_null_entity<Entity>;
         packed.pop_back();
         count = last_pos;
 
-        cudaError_t err = cudaSuccess;
+        typename Backend::error_type err = Backend::success;
 
         if(pos != last_pos) {
             if constexpr(has_value) {
-                err = cudaMemcpyAsync(d_payload + pos, d_payload + last_pos, sizeof(Type), cudaMemcpyDeviceToDevice, stream);
+                err = Backend::memcpy_async(d_payload + pos, d_payload + last_pos, sizeof(Type), Backend::device_to_device, stream);
             }
 
-            if(err == cudaSuccess) {
-                err = cudaMemcpyAsync(d_packed + pos, &last, sizeof(Entity), cudaMemcpyHostToDevice, stream);
+            if(err == Backend::success) {
+                err = Backend::memcpy_async(d_packed + pos, &last, sizeof(Entity), Backend::host_to_device, stream);
             }
 
-            if(err == cudaSuccess) {
-                err = write_sparse_cell(last, internal::cuda_combine<Entity>(pos, last), stream);
+            if(err == Backend::success) {
+                err = write_sparse_cell(last, internal::gpu_combine<Entity>(pos, last), stream);
             }
         }
 
-        if(err == cudaSuccess) {
-            err = write_sparse_cell(value, internal::cuda_null_entity<Entity>, stream);
+        if(err == Backend::success) {
+            err = write_sparse_cell(value, internal::gpu_null_entity<Entity>, stream);
         }
 
         return err;
@@ -666,32 +666,32 @@ public:
 
     void release() noexcept override {
         if(d_packed != nullptr) {
-            cudaFree(d_packed);
+            Backend::free(d_packed);
             d_packed = nullptr;
         }
 
         if constexpr(has_value) {
             if(d_payload != nullptr) {
-                cudaFree(d_payload);
+                Backend::free(d_payload);
                 d_payload = nullptr;
             }
 
             if(d_scratch != nullptr) {
-                cudaFree(d_scratch);
+                Backend::free(d_scratch);
                 d_scratch = nullptr;
             }
         }
 
         for(auto *page: pages_host) {
             if(page != nullptr) {
-                cudaFree(page);
+                Backend::free(page);
             }
         }
 
         pages_host.clear();
 
         if(d_pages != nullptr) {
-            cudaFree(d_pages);
+            Backend::free(d_pages);
             d_pages = nullptr;
         }
     }

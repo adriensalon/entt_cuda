@@ -27,11 +27,7 @@ int main() {
 
     if(available == cudaErrorNoDevice || available == cudaErrorInsufficientDriver || (available == cudaSuccess && devices == 0)) {
         std::printf("No usable CUDA device (status %d, device count %d).\n", static_cast<int>(available), devices);
-#ifdef ENTT_CUDA_REQUIRE_GPU
         return 1;
-#else
-        return 77;
-#endif
     }
 
     if(!check(available)) {
