@@ -100,6 +100,9 @@ struct cuda_pool_base {
     /*! @brief Enqueues a tolerant swap-and-pop removal; a no-op if absent. */
     virtual cudaError_t enqueue_remove(const entity value, cudaStream_t stream) = 0;
 
+    /*! @brief Clears every member; host-only, no device submission. */
+    virtual void clear() noexcept = 0;
+
     /*! @brief Re-points internal bookkeeping after the registry is moved. */
     virtual void rebind_retirement(cuda_retirement &retire) noexcept = 0;
 
@@ -286,6 +289,23 @@ public:
         }
     }
 
+    /*! @brief Returns the typed device pointer for an entity, or null if absent. */
+    template<typename Other>
+    [[nodiscard]] Other *try_get(const entity value) const noexcept {
+        if constexpr(has_value) {
+            return contains(value) ? static_cast<Other *>(d_payload + index_of(value)) : nullptr;
+        } else {
+            return nullptr;
+        }
+    }
+
+    /*! @brief Clears every member; host-only, no device submission. */
+    void clear() noexcept override {
+        packed.clear();
+        sparse.clear();
+        count = 0u;
+    }
+
     /*! @brief Constructs the component on the host and enqueues its upload. */
     template<typename... Args>
     cudaError_t emplace(const entity value, cudaStream_t stream, Args &&...args) {
@@ -330,7 +350,7 @@ public:
     }
 
     /*! @brief Enqueues a device-to-host download of the component value. */
-    cudaError_t enqueue_get(const entity value, Type *dst, cudaStream_t stream) {
+    cudaError_t enqueue_get(const entity value, Type *dst, cudaStream_t stream) const {
         const auto pos = index_of(value);
         return cudaMemcpyAsync(dst, d_payload + pos, sizeof(Type), cudaMemcpyDeviceToHost, stream);
     }
@@ -339,6 +359,18 @@ public:
     cudaError_t enqueue_assign(const entity value, const Type *src, cudaStream_t stream) {
         const auto pos = index_of(value);
         return cudaMemcpyAsync(d_payload + pos, src, sizeof(Type), cudaMemcpyHostToDevice, stream);
+    }
+
+    /*! @brief Constructs a replacement value on the host and uploads it in place. */
+    template<typename... Args>
+    cudaError_t replace(const entity value, cudaStream_t stream, Args &&...args) {
+        if constexpr(has_value) {
+            Type staged{std::forward<Args>(args)...};
+            const auto pos = index_of(value);
+            return cudaMemcpyAsync(d_payload + pos, std::addressof(staged), sizeof(Type), cudaMemcpyHostToDevice, stream);
+        } else {
+            return cudaSuccess;
+        }
     }
 
     cudaError_t enqueue_remove(const entity value, cudaStream_t stream) override {

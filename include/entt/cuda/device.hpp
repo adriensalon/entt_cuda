@@ -145,6 +145,18 @@ __global__ void cuda_view_each_kernel(Func fn, const std::size_t count, const en
     cuda_each_entry(fn, candidate[pos], pools, excluded, std::index_sequence_for<Req...>{});
 }
 
+/*! @brief Applies ordered device-callable functions to one component. */
+template<typename Type, typename... Func>
+__global__ void cuda_patch_kernel(const entity *const *pages, Type *payload, const entity value, Func... funcs) {
+    const auto idx = cuda_sparse_resolve(pages, value);
+
+    if(idx == cuda_npos()) {
+        return;
+    }
+
+    (funcs(payload[idx]), ...);
+}
+
 #endif // __CUDACC__
 
 } // namespace internal

@@ -147,6 +147,19 @@ int main() {
         return 1;
     }
 
+    // Device-callable patch applies ordered functions to one component.
+    if(!check(registry.patch<position>(entities[0], stream, done, [] __device__(position &pos) { pos.y += 10.f; }), "patch")
+       || !check(cudaEventSynchronize(done), "sync patch")
+       || !check(registry.get<position>(entities[0], pinned, stream, done), "get after patch")
+       || !check(cudaEventSynchronize(done), "sync get after patch")) {
+        return 1;
+    }
+
+    if(pinned->y != 11.f) {
+        std::fprintf(stderr, "patch mismatch\n");
+        return 1;
+    }
+
     // Tags, exclusions and callback forms.
     constexpr std::size_t tag_count = 10u;
 

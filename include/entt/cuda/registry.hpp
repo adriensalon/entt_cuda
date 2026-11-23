@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <stdexcept>
 #include <tuple>
@@ -14,6 +15,7 @@
 #include <cuda_runtime_api.h>
 #include <entt/core/type_info.hpp>
 #include <entt/entity/entity.hpp>
+#include <entt/entity/registry.hpp>
 #include <entt/entity/storage.hpp>
 #include "contract.hpp"
 #include "device.hpp"
@@ -63,14 +65,28 @@ struct cuda_registry {
     /*! @brief Pool container keyed by type hash. */
     using pool_container = std::unordered_map<id_type, std::unique_ptr<internal::cuda_pool_base>>;
 
+    /*! @brief Underlying entity identifier. */
+    using entity_type = entity;
+    /*! @brief Underlying version type. */
+    using version_type = entt_traits<entity>::version_type;
+    /*! @brief Unsigned integer type. */
+    using size_type = std::size_t;
+    /*! @brief Allocator type, used by host metadata and the context. */
+    using allocator_type = std::allocator<entity_type>;
+    /*! @brief Type-erased pool interface used by erase_if predicates. */
+    using common_type = internal::cuda_pool_base;
+    /*! @brief General purpose host context. */
+    using context = internal::registry_context<allocator_type>;
+
     identity_storage identity;
     pool_container pools;
     internal::cuda_retirement retirement;
+    context vars{allocator_type{}};
 
     entity *d_identity{};
     std::size_t identity_cap{};
 
-    cudaError_t fault{cudaSuccess};
+    mutable cudaError_t fault{cudaSuccess};
 
     cuda_registry() = default;
     cuda_registry(const cuda_registry &) = delete;
@@ -83,8 +99,22 @@ struct cuda_registry {
     /*! @brief Creates an identifier; CPU-only, no device submission. */
     [[nodiscard]] entity create();
 
+    /*! @brief Creates the suggested identifier if unused, else a fresh one. */
+    [[nodiscard]] entity create(entity hint);
+
+    /*! @brief Assigns each element in a range an identifier. */
+    template<typename It>
+    void create(It first, It last);
+
     /*! @brief Destroys an entity, removing every component and recycling its ID. */
     cudaError_t destroy(entity value, cudaStream_t stream = nullptr, cudaEvent_t done = nullptr);
+
+    /*! @brief Destroys an entity and sets the recycled version. */
+    cudaError_t destroy(entity value, version_type version, cudaStream_t stream = nullptr, cudaEvent_t done = nullptr);
+
+    /*! @brief Destroys every entity in a range. */
+    template<typename It>
+    cudaError_t destroy(It first, It last, cudaStream_t stream = nullptr, cudaEvent_t done = nullptr);
 
     /**
      * @brief Emplaces using the default stream without a completion event.
@@ -113,9 +143,119 @@ struct cuda_registry {
         return emplace_impl<Type>(value, stream, done, std::forward<Args>(args)...);
     }
 
-    template<typename Type>
-    requires internal::cuda_component<std::remove_const_t<Type>>
+    /*! @brief Assigns or replaces the given element for an entity. */
+    template<typename Type, typename... Args>
+    requires (!internal::cuda_leading_handle<cudaStream_t, Args...> && internal::cuda_component_constructible<Type, Args...>)
+    cudaError_t emplace_or_replace(const entity value, Args &&...args) {
+        return emplace_or_replace_impl<Type>(value, nullptr, nullptr, std::forward<Args>(args)...);
+    }
+
+    /*! @brief Assigns or replaces the given element on a native stream. */
+    template<typename Type, typename... Args>
+    requires (!internal::cuda_leading_handle<cudaEvent_t, Args...> && internal::cuda_component_constructible<Type, Args...>)
+    cudaError_t emplace_or_replace(const entity value, const cudaStream_t stream, Args &&...args) {
+        return emplace_or_replace_impl<Type>(value, stream, nullptr, std::forward<Args>(args)...);
+    }
+
+    /*! @brief Assigns or replaces the given element on a stream and event. */
+    template<typename Type, typename... Args>
+    requires internal::cuda_component_constructible<Type, Args...>
+    cudaError_t emplace_or_replace(const entity value, const cudaStream_t stream, const cudaEvent_t done, Args &&...args) {
+        return emplace_or_replace_impl<Type>(value, stream, done, std::forward<Args>(args)...);
+    }
+
+    /*! @brief Emplaces only if absent; the caller accesses via get/try_get. */
+    template<typename Type, typename... Args>
+    requires (!internal::cuda_leading_handle<cudaStream_t, Args...> && internal::cuda_component_constructible<Type, Args...>)
+    cudaError_t get_or_emplace(const entity value, Args &&...args) {
+        return get_or_emplace_impl<Type>(value, nullptr, nullptr, std::forward<Args>(args)...);
+    }
+
+    /*! @brief Emplaces only if absent on a native stream. */
+    template<typename Type, typename... Args>
+    requires (!internal::cuda_leading_handle<cudaEvent_t, Args...> && internal::cuda_component_constructible<Type, Args...>)
+    cudaError_t get_or_emplace(const entity value, const cudaStream_t stream, Args &&...args) {
+        return get_or_emplace_impl<Type>(value, stream, nullptr, std::forward<Args>(args)...);
+    }
+
+    /*! @brief Emplaces only if absent on a stream and event. */
+    template<typename Type, typename... Args>
+    requires internal::cuda_component_constructible<Type, Args...>
+    cudaError_t get_or_emplace(const entity value, const cudaStream_t stream, const cudaEvent_t done, Args &&...args) {
+        return get_or_emplace_impl<Type>(value, stream, done, std::forward<Args>(args)...);
+    }
+
+    /*! @brief Replaces an existing element with a freshly constructed value. */
+    template<typename Type, typename... Args>
+    requires (!internal::cuda_leading_handle<cudaStream_t, Args...> && internal::cuda_component_constructible<Type, Args...>)
+    cudaError_t replace(const entity value, Args &&...args) {
+        return replace_impl<Type>(value, nullptr, nullptr, std::forward<Args>(args)...);
+    }
+
+    /*! @brief Replaces an existing element on a native stream. */
+    template<typename Type, typename... Args>
+    requires (!internal::cuda_leading_handle<cudaEvent_t, Args...> && internal::cuda_component_constructible<Type, Args...>)
+    cudaError_t replace(const entity value, const cudaStream_t stream, Args &&...args) {
+        return replace_impl<Type>(value, stream, nullptr, std::forward<Args>(args)...);
+    }
+
+    /*! @brief Replaces an existing element on a stream and event. */
+    template<typename Type, typename... Args>
+    requires internal::cuda_component_constructible<Type, Args...>
+    cudaError_t replace(const entity value, const cudaStream_t stream, const cudaEvent_t done, Args &&...args) {
+        return replace_impl<Type>(value, stream, done, std::forward<Args>(args)...);
+    }
+
+    /*! @brief Applies ordered device-callable functions to one component. */
+    template<typename Type, typename... Func>
+    cudaError_t patch(const entity value, Func &&...func) {
+        return patch_impl<Type>(value, nullptr, nullptr, std::forward<Func>(func)...);
+    }
+
+    /*! @brief Applies ordered device-callable functions on a native stream. */
+    template<typename Type, typename... Func>
+    cudaError_t patch(const entity value, const cudaStream_t stream, Func &&...func) {
+        return patch_impl<Type>(value, stream, nullptr, std::forward<Func>(func)...);
+    }
+
+    /*! @brief Applies ordered device-callable functions on a stream and event. */
+    template<typename Type, typename... Func>
+    cudaError_t patch(const entity value, const cudaStream_t stream, const cudaEvent_t done, Func &&...func) {
+        return patch_impl<Type>(value, stream, done, std::forward<Func>(func)...);
+    }
+
+    /*! @brief Assigns each entity in a range the given element. */
+    template<typename Type, typename It>
+    cudaError_t insert(It first, It last, const Type &value, cudaStream_t stream = nullptr, cudaEvent_t done = nullptr);
+
+    /*! @brief Assigns each entity in a range one of the given elements. */
+    template<typename Type, typename EIt, typename CIt>
+    requires std::is_same_v<typename std::iterator_traits<CIt>::value_type, Type>
+    cudaError_t insert(EIt first, EIt last, CIt from, cudaStream_t stream = nullptr, cudaEvent_t done = nullptr);
+
+    /*! @brief Removes the given elements from an entity (tolerant). */
+    template<typename Type, typename... Other>
     cudaError_t remove(entity value, cudaStream_t stream = nullptr, cudaEvent_t done = nullptr);
+
+    /*! @brief Removes the given elements from every entity in a range (tolerant). */
+    template<typename Type, typename... Other, typename It>
+    cudaError_t remove(It first, It last, cudaStream_t stream = nullptr, cudaEvent_t done = nullptr);
+
+    /*! @brief Erases the given elements from an entity (strict). */
+    template<typename Type, typename... Other>
+    cudaError_t erase(entity value, cudaStream_t stream = nullptr, cudaEvent_t done = nullptr);
+
+    /*! @brief Erases the given elements from every entity in a range (strict). */
+    template<typename Type, typename... Other, typename It>
+    cudaError_t erase(It first, It last, cudaStream_t stream = nullptr, cudaEvent_t done = nullptr);
+
+    /*! @brief Erases elements satisfying a predicate, receiving pool id and metadata. */
+    template<typename Func>
+    cudaError_t erase_if(entity value, Func func, cudaStream_t stream = nullptr, cudaEvent_t done = nullptr);
+
+    /*! @brief Clears the given pools, or the whole registry for an empty pack. */
+    template<typename... Type>
+    cudaError_t clear(cudaStream_t stream = nullptr, cudaEvent_t done = nullptr);
 
     template<typename Type>
     requires (internal::cuda_component<Type> && !std::is_empty_v<Type>)
@@ -123,7 +263,52 @@ struct cuda_registry {
 
     template<typename Type>
     requires (internal::cuda_component<Type> && !std::is_empty_v<Type>)
+    cudaError_t get(entity value, Type *pinned_host_dst, cudaStream_t stream = nullptr, cudaEvent_t done = nullptr) const;
+
+    template<typename Type>
+    requires (internal::cuda_component<Type> && !std::is_empty_v<Type>)
     cudaError_t assign(entity value, const Type *pinned_host_src, cudaStream_t stream = nullptr, cudaEvent_t done = nullptr);
+
+    /*! @brief Returns non-owning device pointers to the given elements, or null. */
+    template<typename... Type>
+    [[nodiscard]] auto try_get(entity value) noexcept;
+
+    /*! @brief Returns non-owning const device pointers, or null. */
+    template<typename... Type>
+    [[nodiscard]] auto try_get(entity value) const noexcept;
+
+    /*! @brief Checks if an identifier refers to a valid entity. */
+    [[nodiscard]] bool valid(const entity value) const noexcept {
+        return static_cast<std::size_t>(identity.find(value).index()) < identity.free_list();
+    }
+
+    /*! @brief Returns the version of an identifier, or the tombstone version. */
+    [[nodiscard]] version_type current(const entity value) const noexcept {
+        return identity.current(value);
+    }
+
+    /*! @brief Checks if an entity has no elements assigned. */
+    [[nodiscard]] bool orphan(const entity value) const noexcept {
+        for(const auto &[key, pool]: pools) {
+            if(pool->contains(value)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /*! @brief Checks if an entity is part of all the given pools. */
+    template<typename... Type>
+    [[nodiscard]] bool all_of(const entity value) const noexcept {
+        return (has<Type>(value) && ...);
+    }
+
+    /*! @brief Checks if an entity is part of at least one given pool. */
+    template<typename... Type>
+    [[nodiscard]] bool any_of(const entity value) const noexcept {
+        return (has<Type>(value) || ...);
+    }
 
     template<typename... Type, typename... Exclude>
     [[nodiscard]] cuda_view<Type...> view(exclude_t<Exclude...> = exclude_t{});
@@ -134,12 +319,18 @@ struct cuda_registry {
         return pool<Type>();
     }
 
-private:
-    [[nodiscard]] bool valid(const entity value) const noexcept {
-        return static_cast<std::size_t>(identity.find(value).index()) < identity.free_list();
+    /*! @brief Returns the context object. */
+    [[nodiscard]] context &ctx() noexcept {
+        return vars;
     }
 
-    cudaError_t fail(const cudaError_t err) noexcept {
+    /*! @brief Returns the context object. */
+    [[nodiscard]] const context &ctx() const noexcept {
+        return vars;
+    }
+
+private:
+    cudaError_t fail(const cudaError_t err) const noexcept {
         if(fault == cudaSuccess) {
             fault = err;
         }
@@ -154,17 +345,46 @@ private:
     template<typename Type>
     [[nodiscard]] cuda_storage<Type> &pool();
 
+    template<typename Type>
+    [[nodiscard]] const cuda_storage<Type> *find_pool() const noexcept {
+        const auto key = type_hash<Type>::value();
+        const auto it = pools.find(key);
+        return (it != pools.end()) ? static_cast<const cuda_storage<Type> *>(it->second.get()) : nullptr;
+    }
+
+    template<typename Type>
+    [[nodiscard]] bool has(const entity value) const noexcept {
+        const auto *component = find_pool<Type>();
+        return component && component->contains(value);
+    }
+
     cudaError_t upload_identity(std::size_t &count, const entity *&out, cudaStream_t stream);
 
     template<typename Type, typename... Args>
     requires internal::cuda_component_constructible<Type, Args...>
     cudaError_t emplace_impl(entity value, cudaStream_t stream, cudaEvent_t done, Args &&...args);
+
+    template<typename Type, typename... Args>
+    requires internal::cuda_component_constructible<Type, Args...>
+    cudaError_t emplace_or_replace_impl(entity value, cudaStream_t stream, cudaEvent_t done, Args &&...args);
+
+    template<typename Type, typename... Args>
+    requires internal::cuda_component_constructible<Type, Args...>
+    cudaError_t get_or_emplace_impl(entity value, cudaStream_t stream, cudaEvent_t done, Args &&...args);
+
+    template<typename Type, typename... Args>
+    requires internal::cuda_component_constructible<Type, Args...>
+    cudaError_t replace_impl(entity value, cudaStream_t stream, cudaEvent_t done, Args &&...args);
+
+    template<typename Type, typename... Func>
+    cudaError_t patch_impl(entity value, cudaStream_t stream, cudaEvent_t done, Func &&...func);
 };
 
-cuda_registry::cuda_registry(cuda_registry &&other) noexcept
+inline cuda_registry::cuda_registry(cuda_registry &&other) noexcept
     : identity{std::move(other.identity)},
       pools{std::move(other.pools)},
       retirement{std::move(other.retirement)},
+      vars{std::move(other.vars)},
       d_identity{std::exchange(other.d_identity, nullptr)},
       identity_cap{std::exchange(other.identity_cap, 0u)},
       fault{other.fault} {
@@ -173,7 +393,7 @@ cuda_registry::cuda_registry(cuda_registry &&other) noexcept
     }
 }
 
-cuda_registry &cuda_registry::operator=(cuda_registry &&other) noexcept {
+inline cuda_registry &cuda_registry::operator=(cuda_registry &&other) noexcept {
     if(this != &other) {
         retirement.drain();
         cudaDeviceSynchronize();
@@ -189,6 +409,7 @@ cuda_registry &cuda_registry::operator=(cuda_registry &&other) noexcept {
         identity = std::move(other.identity);
         pools = std::move(other.pools);
         retirement = std::move(other.retirement);
+        vars = std::move(other.vars);
         d_identity = std::exchange(other.d_identity, nullptr);
         identity_cap = std::exchange(other.identity_cap, 0u);
         fault = other.fault;
@@ -201,7 +422,7 @@ cuda_registry &cuda_registry::operator=(cuda_registry &&other) noexcept {
     return *this;
 }
 
-cuda_registry::~cuda_registry() {
+inline cuda_registry::~cuda_registry() {
     retirement.drain();
     // Conservative: wait for all library-owned work before releasing buffers.
     cudaDeviceSynchronize();
@@ -228,6 +449,111 @@ cuda_registry::~cuda_registry() {
     }
 
     return identity.generate();
+}
+
+[[nodiscard]] inline entity cuda_registry::create(const entity hint) {
+    if(fault != cudaSuccess) {
+        throw std::logic_error("entt::cuda_registry is in a fault state");
+    }
+
+    constexpr auto max_index = static_cast<std::size_t>(entt_traits<entity>::to_entity(entt::null)) + 1u;
+
+    if(identity.free_list() == identity.size() && identity.size() >= max_index) {
+        throw std::length_error("No more entities available");
+    }
+
+    return identity.generate(hint);
+}
+
+template<typename It>
+inline void cuda_registry::create(It first, It last) {
+    if(fault != cudaSuccess) {
+        throw std::logic_error("entt::cuda_registry is in a fault state");
+    }
+
+    identity.generate(std::move(first), std::move(last));
+}
+
+inline cudaError_t cuda_registry::destroy(const entity value, cudaStream_t stream, cudaEvent_t done) {
+    if(const auto err = fault; err != cudaSuccess) {
+        return err;
+    }
+
+    if(!valid(value)) {
+        return cudaErrorInvalidValue;
+    }
+
+    cudaError_t err = cudaSuccess;
+
+    for(auto &&[key, pool]: pools) {
+        if(const auto curr = pool->enqueue_remove(value, stream); curr != cudaSuccess && err == cudaSuccess) {
+            err = curr;
+        }
+    }
+
+    if(err != cudaSuccess) {
+        return fail(err);
+    }
+
+    identity.erase(value);
+
+    if(const auto curr = record_done(done, stream); curr != cudaSuccess) {
+        return fail(curr);
+    }
+
+    return cudaSuccess;
+}
+
+inline cudaError_t cuda_registry::destroy(const entity value, const version_type version, cudaStream_t stream, cudaEvent_t done) {
+    if(const auto err = destroy(value, stream); err != cudaSuccess) {
+        return err;
+    }
+
+    const auto elem = entt_traits<entity>::construct(entt_traits<entity>::to_entity(value), version);
+    identity.bump((elem == entt::tombstone) ? entt_traits<entity>::next(elem) : elem);
+
+    if(const auto curr = record_done(done, stream); curr != cudaSuccess) {
+        return fail(curr);
+    }
+
+    return cudaSuccess;
+}
+
+template<typename It>
+inline cudaError_t cuda_registry::destroy(It first, It last, cudaStream_t stream, cudaEvent_t done) {
+    if(const auto err = fault; err != cudaSuccess) {
+        return err;
+    }
+
+    std::vector<entity> range(first, last);
+
+    for(const auto value: range) {
+        if(!valid(value)) {
+            return cudaErrorInvalidValue;
+        }
+    }
+
+    cudaError_t err = cudaSuccess;
+
+    for(const auto value: range) {
+        for(auto &&[key, pool]: pools) {
+            if(const auto curr = pool->enqueue_remove(value, stream); curr != cudaSuccess && err == cudaSuccess) {
+                err = curr;
+            }
+        }
+
+        identity.erase(value);
+    }
+
+    if(err != cudaSuccess) {
+        return fail(err);
+    }
+
+    if(const auto curr = record_done(done, stream); curr != cudaSuccess) {
+        return fail(curr);
+    }
+
+    return cudaSuccess;
 }
 
 template<typename Type>
@@ -297,8 +623,158 @@ inline cudaError_t cuda_registry::emplace_impl(const entity value, cudaStream_t 
     return cudaSuccess;
 }
 
-template<typename Type>
-requires internal::cuda_component<std::remove_const_t<Type>>
+template<typename Type, typename... Args>
+requires internal::cuda_component_constructible<Type, Args...>
+inline cudaError_t cuda_registry::emplace_or_replace_impl(const entity value, cudaStream_t stream, cudaEvent_t done, Args &&...args) {
+    if(const auto err = fault; err != cudaSuccess) {
+        return err;
+    }
+
+    if(!valid(value)) {
+        return cudaErrorInvalidValue;
+    }
+
+    auto &component = pool<Type>();
+
+    if(const auto err = (component.contains(value) ? component.replace(value, stream, std::forward<Args>(args)...) : component.emplace(value, stream, std::forward<Args>(args)...)); err != cudaSuccess) {
+        return fail(err);
+    }
+
+    if(const auto err = record_done(done, stream); err != cudaSuccess) {
+        return fail(err);
+    }
+
+    return cudaSuccess;
+}
+
+template<typename Type, typename... Args>
+requires internal::cuda_component_constructible<Type, Args...>
+inline cudaError_t cuda_registry::get_or_emplace_impl(const entity value, cudaStream_t stream, cudaEvent_t done, Args &&...args) {
+    if(const auto err = fault; err != cudaSuccess) {
+        return err;
+    }
+
+    if(!valid(value)) {
+        return cudaErrorInvalidValue;
+    }
+
+    auto &component = pool<Type>();
+
+    if(!component.contains(value)) {
+        if(const auto err = component.emplace(value, stream, std::forward<Args>(args)...); err != cudaSuccess) {
+            return fail(err);
+        }
+    }
+
+    if(const auto err = record_done(done, stream); err != cudaSuccess) {
+        return fail(err);
+    }
+
+    return cudaSuccess;
+}
+
+template<typename Type, typename... Args>
+requires internal::cuda_component_constructible<Type, Args...>
+inline cudaError_t cuda_registry::replace_impl(const entity value, cudaStream_t stream, cudaEvent_t done, Args &&...args) {
+    if(const auto err = fault; err != cudaSuccess) {
+        return err;
+    }
+
+    if(!valid(value)) {
+        return cudaErrorInvalidValue;
+    }
+
+    auto &component = pool<Type>();
+
+    if(!component.contains(value)) {
+        return cudaErrorInvalidValue;
+    }
+
+    if(const auto err = component.replace(value, stream, std::forward<Args>(args)...); err != cudaSuccess) {
+        return fail(err);
+    }
+
+    if(const auto err = record_done(done, stream); err != cudaSuccess) {
+        return fail(err);
+    }
+
+    return cudaSuccess;
+}
+
+template<typename Type, typename It>
+inline cudaError_t cuda_registry::insert(It first, It last, const Type &value, cudaStream_t stream, cudaEvent_t done) {
+    if(const auto err = fault; err != cudaSuccess) {
+        return err;
+    }
+
+    std::vector<entity> range(first, last);
+
+    for(const auto entity: range) {
+        if(!valid(entity)) {
+            return cudaErrorInvalidValue;
+        }
+    }
+
+    auto &component = pool<Type>();
+
+    for(const auto entity: range) {
+        if(component.contains(entity)) {
+            return cudaErrorInvalidValue;
+        }
+    }
+
+    for(const auto entity: range) {
+        if(const auto err = component.emplace(entity, stream, value); err != cudaSuccess) {
+            return fail(err);
+        }
+    }
+
+    if(const auto err = record_done(done, stream); err != cudaSuccess) {
+        return fail(err);
+    }
+
+    return cudaSuccess;
+}
+
+template<typename Type, typename EIt, typename CIt>
+requires std::is_same_v<typename std::iterator_traits<CIt>::value_type, Type>
+inline cudaError_t cuda_registry::insert(EIt first, EIt last, CIt from, cudaStream_t stream, cudaEvent_t done) {
+    if(const auto err = fault; err != cudaSuccess) {
+        return err;
+    }
+
+    std::vector<entity> range(first, last);
+
+    for(const auto entity: range) {
+        if(!valid(entity)) {
+            return cudaErrorInvalidValue;
+        }
+    }
+
+    auto &component = pool<Type>();
+
+    for(const auto entity: range) {
+        if(component.contains(entity)) {
+            return cudaErrorInvalidValue;
+        }
+    }
+
+    for(const auto entity: range) {
+        if(const auto err = component.emplace(entity, stream, *from); err != cudaSuccess) {
+            return fail(err);
+        }
+
+        ++from;
+    }
+
+    if(const auto err = record_done(done, stream); err != cudaSuccess) {
+        return fail(err);
+    }
+
+    return cudaSuccess;
+}
+
+template<typename Type, typename... Other>
 inline cudaError_t cuda_registry::remove(const entity value, cudaStream_t stream, cudaEvent_t done) {
     if(const auto err = fault; err != cudaSuccess) {
         return err;
@@ -308,10 +784,147 @@ inline cudaError_t cuda_registry::remove(const entity value, cudaStream_t stream
         return cudaErrorInvalidValue;
     }
 
-    auto &component = pool<std::remove_const_t<Type>>();
+    cudaError_t err = cudaSuccess;
+    const auto enqueue = [&](auto &component) {
+        if(const auto curr = component.enqueue_remove(value, stream); curr != cudaSuccess && err == cudaSuccess) {
+            err = curr;
+        }
+    };
 
-    if(const auto err = component.enqueue_remove(value, stream); err != cudaSuccess) {
+    enqueue(pool<std::remove_const_t<Type>>());
+    ((enqueue(pool<std::remove_const_t<Other>>())), ...);
+
+    if(err != cudaSuccess) {
         return fail(err);
+    }
+
+    if(const auto curr = record_done(done, stream); curr != cudaSuccess) {
+        return fail(curr);
+    }
+
+    return cudaSuccess;
+}
+
+template<typename Type, typename... Other, typename It>
+inline cudaError_t cuda_registry::remove(It first, It last, cudaStream_t stream, cudaEvent_t done) {
+    if(const auto err = fault; err != cudaSuccess) {
+        return err;
+    }
+
+    std::vector<entity> range(first, last);
+
+    for(const auto entity: range) {
+        if(!valid(entity)) {
+            return cudaErrorInvalidValue;
+        }
+    }
+
+    cudaError_t err = cudaSuccess;
+    const auto enqueue = [&](auto &component, const entity entity) {
+        if(const auto curr = component.enqueue_remove(entity, stream); curr != cudaSuccess && err == cudaSuccess) {
+            err = curr;
+        }
+    };
+
+    for(const auto entity: range) {
+        enqueue(pool<std::remove_const_t<Type>>(), entity);
+        ((enqueue(pool<std::remove_const_t<Other>>(), entity)), ...);
+    }
+
+    if(err != cudaSuccess) {
+        return fail(err);
+    }
+
+    if(const auto curr = record_done(done, stream); curr != cudaSuccess) {
+        return fail(curr);
+    }
+
+    return cudaSuccess;
+}
+
+template<typename Type, typename... Other>
+inline cudaError_t cuda_registry::erase(const entity value, cudaStream_t stream, cudaEvent_t done) {
+    if(const auto err = fault; err != cudaSuccess) {
+        return err;
+    }
+
+    if(!valid(value)) {
+        return cudaErrorInvalidValue;
+    }
+
+    if(!(has<Type>(value) && (has<Other>(value) && ...))) {
+        return cudaErrorInvalidValue;
+    }
+
+    return remove<Type, Other...>(value, stream, done);
+}
+
+template<typename Type, typename... Other, typename It>
+inline cudaError_t cuda_registry::erase(It first, It last, cudaStream_t stream, cudaEvent_t done) {
+    if(const auto err = fault; err != cudaSuccess) {
+        return err;
+    }
+
+    std::vector<entity> range(first, last);
+
+    for(const auto entity: range) {
+        if(!valid(entity) || !(has<Type>(entity) && (has<Other>(entity) && ...))) {
+            return cudaErrorInvalidValue;
+        }
+    }
+
+    return remove<Type, Other...>(range.begin(), range.end(), stream, done);
+}
+
+template<typename Func>
+inline cudaError_t cuda_registry::erase_if(const entity value, Func func, cudaStream_t stream, cudaEvent_t done) {
+    if(const auto err = fault; err != cudaSuccess) {
+        return err;
+    }
+
+    if(!valid(value)) {
+        return cudaErrorInvalidValue;
+    }
+
+    cudaError_t err = cudaSuccess;
+
+    for(auto &&[id, pool]: pools) {
+        if(pool->contains(value) && func(id, std::as_const(*pool))) {
+            if(const auto curr = pool->enqueue_remove(value, stream); curr != cudaSuccess && err == cudaSuccess) {
+                err = curr;
+            }
+        }
+    }
+
+    if(err != cudaSuccess) {
+        return fail(err);
+    }
+
+    if(const auto curr = record_done(done, stream); curr != cudaSuccess) {
+        return fail(curr);
+    }
+
+    return cudaSuccess;
+}
+
+template<typename... Type>
+inline cudaError_t cuda_registry::clear(cudaStream_t stream, cudaEvent_t done) {
+    if(const auto err = fault; err != cudaSuccess) {
+        return err;
+    }
+
+    if constexpr(sizeof...(Type) == 0u) {
+        for(auto &&[key, pool]: pools) {
+            pool->clear();
+        }
+
+        std::vector<entity> alive(identity.data(), identity.data() + identity.free_list());
+
+        for(const auto entity: alive) {
+            identity.erase(entity);
+        }
+    } else {
+        (pool<Type>().clear(), ...);
     }
 
     if(const auto err = record_done(done, stream); err != cudaSuccess) {
@@ -351,6 +964,34 @@ inline cudaError_t cuda_registry::get(const entity value, Type *pinned_host_dst,
 
 template<typename Type>
 requires (internal::cuda_component<Type> && !std::is_empty_v<Type>)
+inline cudaError_t cuda_registry::get(const entity value, Type *pinned_host_dst, cudaStream_t stream, cudaEvent_t done) const {
+    if(const auto err = fault; err != cudaSuccess) {
+        return err;
+    }
+
+    if(!valid(value) || pinned_host_dst == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+
+    const auto *component = find_pool<Type>();
+
+    if(component == nullptr || !component->contains(value)) {
+        return cudaErrorInvalidValue;
+    }
+
+    if(const auto err = component->enqueue_get(value, pinned_host_dst, stream); err != cudaSuccess) {
+        return fail(err);
+    }
+
+    if(const auto err = record_done(done, stream); err != cudaSuccess) {
+        return fail(err);
+    }
+
+    return cudaSuccess;
+}
+
+template<typename Type>
+requires (internal::cuda_component<Type> && !std::is_empty_v<Type>)
 inline cudaError_t cuda_registry::assign(const entity value, const Type *pinned_host_src, cudaStream_t stream, cudaEvent_t done) {
     if(const auto err = fault; err != cudaSuccess) {
         return err;
@@ -377,6 +1018,28 @@ inline cudaError_t cuda_registry::assign(const entity value, const Type *pinned_
     return cudaSuccess;
 }
 
+template<typename... Type>
+[[nodiscard]] inline auto cuda_registry::try_get(const entity value) noexcept {
+    if constexpr(sizeof...(Type) == 1u) {
+        using element = std::tuple_element_t<0, std::tuple<Type...>>;
+        auto &component = pool<std::remove_const_t<element>>();
+        return component.template try_get<element>(value);
+    } else {
+        return std::make_tuple(try_get<Type>(value)...);
+    }
+}
+
+template<typename... Type>
+[[nodiscard]] inline auto cuda_registry::try_get(const entity value) const noexcept {
+    if constexpr(sizeof...(Type) == 1u) {
+        using element = std::tuple_element_t<0, std::tuple<Type...>>;
+        const auto *component = find_pool<std::remove_const_t<element>>();
+        return component ? component->template try_get<const element>(value) : nullptr;
+    } else {
+        return std::make_tuple(try_get<Type>(value)...);
+    }
+}
+
 template<typename... Type, typename... Exclude>
 [[nodiscard]] inline cuda_view<Type...> cuda_registry::view(exclude_t<Exclude...>) {
     cuda_view<Type...> result;
@@ -386,7 +1049,10 @@ template<typename... Type, typename... Exclude>
     return result;
 }
 
-inline cudaError_t cuda_registry::destroy(const entity value, cudaStream_t stream, cudaEvent_t done) {
+#ifdef __CUDACC__
+
+template<typename Type, typename... Func>
+inline cudaError_t cuda_registry::patch_impl(const entity value, cudaStream_t stream, cudaEvent_t done, Func &&...func) {
     if(const auto err = fault; err != cudaSuccess) {
         return err;
     }
@@ -395,28 +1061,26 @@ inline cudaError_t cuda_registry::destroy(const entity value, cudaStream_t strea
         return cudaErrorInvalidValue;
     }
 
-    cudaError_t err = cudaSuccess;
+    auto &component = pool<Type>();
 
-    for(auto &&[key, pool]: pools) {
-        if(const auto curr = pool->enqueue_remove(value, stream); curr != cudaSuccess && err == cudaSuccess) {
-            err = curr;
+    if(!component.contains(value)) {
+        return cudaErrorInvalidValue;
+    }
+
+    if constexpr(!std::is_empty_v<Type>) {
+        internal::cuda_patch_kernel<<<1, 1, 0, stream>>>(component.pages(), component.template payload_device<Type>(), value, func...);
+
+        if(const auto err = cudaGetLastError(); err != cudaSuccess) {
+            return fail(err);
         }
     }
 
-    if(err != cudaSuccess) {
+    if(const auto err = record_done(done, stream); err != cudaSuccess) {
         return fail(err);
-    }
-
-    identity.erase(value);
-
-    if(const auto curr = record_done(done, stream); curr != cudaSuccess) {
-        return fail(curr);
     }
 
     return cudaSuccess;
 }
-
-#ifdef __CUDACC__
 
 template<typename... Type>
 template<typename Func>

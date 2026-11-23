@@ -29,3 +29,8 @@ add_executable(entt_cuda_registry_parity registry_parity.cpp)
 target_link_libraries(entt_cuda_registry_parity PRIVATE EnTT::Cuda)
 add_test(NAME entt_cuda.registry_parity COMMAND entt_cuda_registry_parity)
 set_tests_properties(entt_cuda.registry_parity PROPERTIES SKIP_RETURN_CODE 77 LABELS "host;runtime")
+
+add_executable(entt_cuda_registry_breadth registry_breadth.cpp)
+target_link_libraries(entt_cuda_registry_breadth PRIVATE EnTT::Cuda)
+add_test(NAME entt_cuda.registry_breadth COMMAND entt_cuda_registry_breadth)
+set_tests_properties(entt_cuda.registry_breadth PROPERTIES SKIP_RETURN_CODE 77 LABELS "host;runtime")

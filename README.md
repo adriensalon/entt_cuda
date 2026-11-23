@@ -3,14 +3,16 @@
 An EnTT-style CUDA registry with host-owned identity/structure and GPU-authoritative
 component values.
 
-**Current status: phase 1 (asynchronous core) complete.** Host identity, device
-pools/sparse pages, emplacement, swap-and-pop removal, transfers, and typed device
-dispatch (`view<T...>().each`) work end-to-end, with safe allocation retirement,
-fault tracking and teardown. Acceptance is covered by `registry_core.cu`
-(dispatch/relocation/tags/callbacks/handoffs/moves), `registry_fault.cu` (sticky
-fault state) and `registry_parity.cpp` (randomized parity against the CPU EnTT
-reference), all clean under Compute Sanitizer. Later gates (registry breadth,
-groups, order, reactivity, persistence) remain pending.
+**Current status: phase 2 (registry breadth) implemented.** Phase 1 delivered the
+asynchronous core (host identity, device pools/sparse pages, emplacement, removal,
+transfers, typed dispatch, retirement, fault tracking and teardown). Phase 2 adds
+the breadth inventory: host metadata (`valid`, `current`, `orphan`, `all_of`,
+`any_of`), hinted/ranged creation, versioned/ranged destruction, `insert`,
+`emplace_or_replace`, `get_or_emplace`, `replace`, device-callable `patch`,
+multi-type/ranged `remove`, strict `erase`/`erase_if`, `clear`, const access,
+`try_get` device-pointer lookup and the host `ctx()` context. Remaining gates
+(groups, order, reactivity, persistence, allocator customization, named pools)
+stay pending.
 
 The compatibility reference is EnTT revision
 `1dcd7aab6548786f7672ff578639188bd2f0d837` (declaring 4.1.0). The submodule is
@@ -18,47 +20,43 @@ unchanged.
 
 ## Build on Windows
 
-Use CMake 3.28+, Ninja, Visual Studio 2022's x64 C++ tools, and NVIDIA CUDA 13.2+.
-The checked combination is nvcc 13.2.51 with MSVC 19.44.35229, in C++20 mode.
-The provided bootstrap script downloads NVIDIA's compiler/runtime/header packages,
-verifies archive SHA-256 values from the versioned NVIDIA manifest, and expands
-them under ignored `.dev/`. It does not install a driver or change system CUDA.
-Original package licenses remain under `.dev/cuda-downloads/`.
+Use CMake 3.28+, Visual Studio 2022/2026's x64 C++ tools, and an NVIDIA CUDA 13.x
+toolkit installed system-wide. No workspace-local bootstrap is required: point
+CMake at the installed toolkit and build the Visual Studio solution. This
+machine's GTX 1650 uses compute capability 75.
 
 ```powershell
 git submodule update --init external/entt
-./tools/bootstrap-cuda.ps1
+cmake -S . -B build -G "Visual Studio 18 2026" -DCMAKE_CUDA_ARCHITECTURES=75
+cmake --build build --config Debug
+ctest --test-dir build -C Debug --output-on-failure
 ```
 
-Then use an x64 VS 2022 developer shell. Set the compiler/toolkit explicitly so a
-system CUDA installation cannot override it. This machine's GTX 1650 uses
-`75-real`; select the architecture for your GPU when building elsewhere.
-
-```powershell
-$enttCudaToolkit = (Resolve-Path .dev/cuda-13.2.0).Path
-$env:PATH = "$enttCudaToolkit/bin;$env:PATH"
-cmake -S . -B build/cuda-13.2 -G Ninja `
-    -DCMAKE_BUILD_TYPE=Debug `
-    -DCMAKE_CUDA_ARCHITECTURES=75-real `
-    -DCMAKE_CUDA_COMPILER:FILEPATH="$enttCudaToolkit/bin/nvcc.exe" `
-    -DCUDAToolkit_ROOT:PATH="$enttCudaToolkit"
-cmake --build build/cuda-13.2
-ctest --test-dir build/cuda-13.2 --output-on-failure
-```
-
-If Ninja on `PATH` cannot run, pass `-DCMAKE_MAKE_PROGRAM:FILEPATH=.../ninja.exe`
-using the copy bundled under Visual Studio's
-`Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/` directory.
+If more than one toolkit is installed, `find_package(CUDAToolkit)` selects the
+latest by default; override with `-DCUDAToolkit_ROOT=...` and make sure the
+matching versioned `CUDA_PATH_Vx_y` variable is set for the MSBuild CUDA rules.
 
 `ENTT_CUDA_BUILD_TESTING=OFF` disables local test targets. For acceptance or GPU CI,
 configure with `-DENTT_CUDA_REQUIRE_GPU=ON` to make an unusable device a failure.
-By default the runtime test reports a CTest skip for an absent device or
+By default a runtime test reports a CTest skip for an absent device or
 insufficient driver; all other CUDA failures fail the test. Keep the selected
 toolkit's `bin` on `PATH` when running executables linked to its shared runtime.
 
 Consumers use `add_subdirectory(...)`, link `EnTT::Cuda`, and include
 `<entt/entt_cuda.hpp>`. Device callbacks require CUDA translation units. Installation
 and exported-package support are deferred.
+
+## Formatting
+
+`include/` and `test/` follow the EnTT style via the root `.clang-format` (which
+mirrors `external/entt/.clang-format`). Check or rewrite with the local helper,
+which also normalizes clang-format's CUDA extended-lambda artifact so `Type &name`
+is preserved:
+
+```powershell
+python tools/check-format.py           # report differences
+python tools/check-format.py --fix     # rewrite in place
+```
 
 ## Validation and toolchain limits
 
@@ -80,21 +78,26 @@ and exported-package support are deferred.
   error, `create()` throws `std::logic_error`, and teardown stays safe.
 - `registry_parity.cpp` drives 3000 randomized create/destroy/emplace/remove/
   assign steps against a CPU `entt::registry` reference and compares membership
-  and downloaded values bit-exactly. It lives in a host translation unit because
-  nvcc 13.2 rejects the upstream CPU registry's `basic_any` SBO union.
+  and downloaded values bit-exactly.
+- `registry_breadth.cpp` exercises the phase-2 surface: hinted/ranged creation,
+  versioned/ranged destruction, `all_of`/`any_of`/`orphan`/`current`, const
+  access, `try_get` device pointers (single and tuple), `insert`,
+  `emplace_or_replace`, `get_or_emplace`, `replace`, multi-type/ranged `remove`,
+  strict `erase`/`erase_if`, `clear`, and the host context. `registry_core.cu`
+  additionally covers device-callable `patch`.
 - `toolchain.cu` keeps the standalone extended-lambda and pinned transfer smoke
   test as a driver/runtime canary.
 
-On this workspace, the CUDA 13.2 Debug build, host test and GPU runtime test all
-pass. The GPU test previously skipped under driver 532.09 (CUDA driver API 12.1),
-which could not run the CUDA 13 runtime; driver 621.24 (CUDA user-mode 13.5) now
-runs the same workspace-local CUDA 13.2 toolkit (nvcc 13.2.51) on the GTX 1650.
-This closes phase 0. NVIDIA documents CUDA 13's driver requirements in its
+On this workspace the CUDA 13.4 Debug build and all six tests pass, and the
+registry core and breadth tests report clean under Compute Sanitizer memcheck
+(0 errors, 0 leaked allocations). The GPU test previously skipped under driver
+532.09 (CUDA driver API 12.1); driver 621.24 now runs CUDA 13 runtimes on the
+GTX 1650. NVIDIA documents CUDA 13's driver requirements in its
 [compatibility guide](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html).
 
-nvcc 12.4.131 and 12.9.86 both reject `core/hashed_string.hpp:122` in the pinned
-EnTT source. nvcc 13.2 parses that header and compiles the reused facilities above,
-but instantiating the full CPU registry in a CUDA translation unit hits a separate
-`basic_any` SBO-union initialization diagnostic. Keep the CPU reference in host
-translation units. The relevant upstream files are preserved; no compiler checks
-are bypassed and no compatibility headers shadow the submodule.
+nvcc 12.4 rejects `core/hashed_string.hpp:122` in the pinned EnTT source. nvcc
+13.x parses that header, but instantiating the full CPU registry in a CUDA
+translation unit hits a separate `basic_any` SBO-union initialization diagnostic,
+so the CPU EnTT reference lives in host translation units. The relevant upstream
+files are preserved; no compiler checks are bypassed and no compatibility headers
+shadow the submodule.
