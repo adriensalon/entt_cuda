@@ -68,3 +68,13 @@ check(cudaFreeHost(result));
 check(registry.destroy(e, stream, done));
 check(cudaEventSynchronize(done));
 ```
+
+## HIP backend (experimental)
+
+The generic core in `include/entt/gpu/` is backend-agnostic; `include/entt/backend/`
+supplies `cuda_backend` and `hip_backend`, and `<entt/entt_hip.hpp>` exposes the
+`hip_registry`/`hip_view`/... aliases over the same registry. A ROCm/hipcc
+toolchain enables the optional `EnTT::Hip` interface target (detected via
+`check_language(HIP)`). The HIP backend is written and clang-format clean but
+not yet runtime-verified on this workspace, which has no AMD toolchain; see
+[docs/backend-portability.md](docs/backend-portability.md).

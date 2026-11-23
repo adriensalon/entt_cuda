@@ -1,3 +1,4 @@
+if(ENTT_CUDA_AVAILABLE)
 add_library(entt_cuda_api_contract OBJECT api_contract.cu dependency_contract.cu)
 target_link_libraries(entt_cuda_api_contract PRIVATE EnTT::Cuda)
 
@@ -50,3 +51,21 @@ add_executable(entt_cuda_registry_reactivity registry_reactivity.cpp)
 target_link_libraries(entt_cuda_registry_reactivity PRIVATE EnTT::Cuda)
 add_test(NAME entt_cuda.registry_reactivity COMMAND entt_cuda_registry_reactivity)
 set_tests_properties(entt_cuda.registry_reactivity PROPERTIES SKIP_RETURN_CODE 77 LABELS "host;runtime")
+endif()
+
+## entt_hip tests (only when a HIP toolchain is available)
+if(ENTT_CUDA_HIP_AVAILABLE)
+    set_source_files_properties(toolchain_hip.cpp registry_core_hip.cpp PROPERTIES LANGUAGE HIP)
+
+    add_executable(entt_hip_toolchain toolchain_hip.cpp)
+    target_link_libraries(entt_hip_toolchain PRIVATE EnTT::Hip)
+    target_compile_definitions(entt_hip_toolchain PRIVATE "$<$<BOOL:${ENTT_CUDA_REQUIRE_GPU}>:ENTT_CUDA_REQUIRE_GPU>")
+    add_test(NAME entt_hip.toolchain COMMAND entt_hip_toolchain)
+    set_tests_properties(entt_hip.toolchain PROPERTIES SKIP_RETURN_CODE 77 LABELS "hip;runtime")
+
+    add_executable(entt_hip_registry_core registry_core_hip.cpp)
+    target_link_libraries(entt_hip_registry_core PRIVATE EnTT::Hip)
+    target_compile_definitions(entt_hip_registry_core PRIVATE "$<$<BOOL:${ENTT_CUDA_REQUIRE_GPU}>:ENTT_CUDA_REQUIRE_GPU>")
+    add_test(NAME entt_hip.registry_core COMMAND entt_hip_registry_core)
+    set_tests_properties(entt_hip.registry_core PROPERTIES SKIP_RETURN_CODE 77 LABELS "hip;runtime")
+endif()
