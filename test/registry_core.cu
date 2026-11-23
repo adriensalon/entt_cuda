@@ -216,6 +216,24 @@ int main() {
 
     check(cudaEventSynchronize(done), "sync missing pool view");
 
+    // Runtime view dispatches entity identifiers only.
+    check(cudaMemset(counter, 0, sizeof(int)), "runtime counter memset");
+
+    if(!check(registry.runtime_view().iterate<position>().exclude<tag>().each(
+                  [counter] __device__(entt::entity) { atomicAdd(counter, 1); }, stream, done),
+              "runtime view each")) {
+        return 1;
+    }
+
+    check(cudaEventSynchronize(done), "sync runtime view");
+
+    check(cudaMemcpy(&host_count, counter, sizeof(int), cudaMemcpyDeviceToHost), "runtime counter copy");
+
+    if(host_count != static_cast<int>(entity_count - 1u - tag_count)) {
+        std::fprintf(stderr, "runtime view count mismatch: got %d\n", host_count);
+        return 1;
+    }
+
     // Destroy recycles the identifier with a bumped version.
     const auto victim = entities[1];
     const auto victim_entity = entt::to_entity(victim);

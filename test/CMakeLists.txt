@@ -34,3 +34,8 @@ add_executable(entt_cuda_registry_breadth registry_breadth.cpp)
 target_link_libraries(entt_cuda_registry_breadth PRIVATE EnTT::Cuda)
 add_test(NAME entt_cuda.registry_breadth COMMAND entt_cuda_registry_breadth)
 set_tests_properties(entt_cuda.registry_breadth PROPERTIES SKIP_RETURN_CODE 77 LABELS "host;runtime")
+
+add_executable(entt_cuda_registry_storage registry_storage.cpp)
+target_link_libraries(entt_cuda_registry_storage PRIVATE EnTT::Cuda)
+add_test(NAME entt_cuda.registry_storage COMMAND entt_cuda_registry_storage)
+set_tests_properties(entt_cuda.registry_storage PROPERTIES SKIP_RETURN_CODE 77 LABELS "host;runtime")

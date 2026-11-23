@@ -3,16 +3,14 @@
 An EnTT-style CUDA registry with host-owned identity/structure and GPU-authoritative
 component values.
 
-**Current status: phase 2 (registry breadth) implemented.** Phase 1 delivered the
-asynchronous core (host identity, device pools/sparse pages, emplacement, removal,
-transfers, typed dispatch, retirement, fault tracking and teardown). Phase 2 adds
-the breadth inventory: host metadata (`valid`, `current`, `orphan`, `all_of`,
-`any_of`), hinted/ranged creation, versioned/ranged destruction, `insert`,
-`emplace_or_replace`, `get_or_emplace`, `replace`, device-callable `patch`,
-multi-type/ranged `remove`, strict `erase`/`erase_if`, `clear`, const access,
-`try_get` device-pointer lookup and the host `ctx()` context. Remaining gates
-(groups, order, reactivity, persistence, allocator customization, named pools)
-stay pending.
+**Current status: phase 3 (query/storage breadth) complete.** Phase 1 delivered
+the asynchronous core and phase 2 the registry breadth. Phase 3 adds named pools
+(`storage<T>(id)`), nullable type-erased lookup (`storage(id)`), pool enumeration
+(`storage()`), stream-aware `reset(id)` with allocation retirement,
+`storage_for_type<T>`, typed view `contains`/`size_hint`/host `each_entity`/`rebind`,
+and a runtime view dispatching entity identifiers without runtime device
+compilation. Remaining gates (groups, order, reactivity, persistence, allocator
+customization) stay pending.
 
 The compatibility reference is EnTT revision
 `1dcd7aab6548786f7672ff578639188bd2f0d837` (declaring 4.1.0). The submodule is
@@ -85,6 +83,10 @@ python tools/check-format.py --fix     # rewrite in place
   `emplace_or_replace`, `get_or_emplace`, `replace`, multi-type/ranged `remove`,
   strict `erase`/`erase_if`, `clear`, and the host context. `registry_core.cu`
   additionally covers device-callable `patch`.
+- `registry_storage.cpp` exercises the phase-3 surface: named pools, type-erased
+  lookup, pool enumeration, stream-aware `reset`, typed view `contains`/`size_hint`,
+  host entity iteration and rebinding. `registry_core.cu` additionally covers the
+  runtime view dispatching entity identifiers.
 - `toolchain.cu` keeps the standalone extended-lambda and pinned transfer smoke
   test as a driver/runtime canary.
 

@@ -3,9 +3,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <memory>
+#include <utility>
 #include <vector>
 #include <cuda_runtime_api.h>
+#include <entt/core/type_info.hpp>
 #include <entt/entity/entity.hpp>
 #include "contract.hpp"
 #include "device.hpp"
@@ -97,11 +100,17 @@ struct cuda_pool_base {
     [[nodiscard]] virtual std::size_t capacity() const noexcept = 0;
     [[nodiscard]] virtual bool contains(const entity value) const noexcept = 0;
 
+    /*! @brief Returns the type hash of the stored component type. */
+    [[nodiscard]] virtual id_type type() const noexcept = 0;
+
     /*! @brief Enqueues a tolerant swap-and-pop removal; a no-op if absent. */
     virtual cudaError_t enqueue_remove(const entity value, cudaStream_t stream) = 0;
 
     /*! @brief Clears every member; host-only, no device submission. */
     virtual void clear() noexcept = 0;
+
+    /*! @brief Retires every live device allocation after the stream completes. */
+    virtual void reset(cudaStream_t stream) noexcept = 0;
 
     /*! @brief Re-points internal bookkeeping after the registry is moved. */
     virtual void rebind_retirement(cuda_retirement &retire) noexcept = 0;
@@ -111,6 +120,67 @@ struct cuda_pool_base {
 
     [[nodiscard]] virtual const entity *packed_device() const noexcept = 0;
     [[nodiscard]] virtual const entity *const *pages() const noexcept = 0;
+    [[nodiscard]] virtual const entity *data() const noexcept = 0;
+};
+
+/*! @brief Forward iterator over a pool map yielding (id, pool reference) pairs. */
+template<typename It, typename Pool>
+class cuda_pool_iterator {
+    It it;
+
+public:
+    using iterator_category = std::forward_iterator_tag;
+    using value_type = std::pair<id_type, Pool &>;
+    using reference = value_type;
+    using pointer = void;
+    using difference_type = std::ptrdiff_t;
+
+    cuda_pool_iterator() = default;
+    explicit cuda_pool_iterator(It curr) noexcept
+        : it{curr} {}
+
+    [[nodiscard]] value_type operator*() const noexcept {
+        return {it->first, *it->second};
+    }
+
+    cuda_pool_iterator &operator++() noexcept {
+        ++it;
+        return *this;
+    }
+
+    cuda_pool_iterator operator++(int) noexcept {
+        cuda_pool_iterator copy = *this;
+        ++(*this);
+        return copy;
+    }
+
+    [[nodiscard]] bool operator==(const cuda_pool_iterator &other) const noexcept {
+        return it == other.it;
+    }
+
+    [[nodiscard]] bool operator!=(const cuda_pool_iterator &other) const noexcept {
+        return it != other.it;
+    }
+};
+
+/*! @brief A lightweight range over a pool map. */
+template<typename It, typename Pool>
+class cuda_pool_range {
+    It first;
+    It last;
+
+public:
+    cuda_pool_range(It begin, It end) noexcept
+        : first{begin},
+          last{end} {}
+
+    [[nodiscard]] cuda_pool_iterator<It, Pool> begin() const noexcept {
+        return cuda_pool_iterator<It, Pool>{first};
+    }
+
+    [[nodiscard]] cuda_pool_iterator<It, Pool> end() const noexcept {
+        return cuda_pool_iterator<It, Pool>{last};
+    }
 };
 
 } // namespace internal
@@ -254,6 +324,10 @@ public:
         retirement = &other;
     }
 
+    [[nodiscard]] id_type type() const noexcept override {
+        return type_hash<Type>::value();
+    }
+
     [[nodiscard]] std::size_t size() const noexcept override {
         return count;
     }
@@ -273,6 +347,10 @@ public:
 
     [[nodiscard]] const entity *packed_device() const noexcept override {
         return d_packed;
+    }
+
+    [[nodiscard]] const entity *data() const noexcept override {
+        return packed.data();
     }
 
     [[nodiscard]] const entity *const *pages() const noexcept override {
@@ -301,6 +379,29 @@ public:
 
     /*! @brief Clears every member; host-only, no device submission. */
     void clear() noexcept override {
+        packed.clear();
+        sparse.clear();
+        count = 0u;
+    }
+
+    /*! @brief Retires every live device allocation after the stream completes. */
+    void reset(cudaStream_t stream) noexcept override {
+        retirement->retire(d_packed, stream);
+
+        if constexpr(has_value) {
+            retirement->retire(d_payload, stream);
+        }
+
+        for(auto *page: pages_host) {
+            retirement->retire(page, stream);
+        }
+
+        retirement->retire(d_pages, stream);
+
+        d_packed = nullptr;
+        d_payload = nullptr;
+        pages_host.clear();
+        d_pages = nullptr;
         packed.clear();
         sparse.clear();
         count = 0u;

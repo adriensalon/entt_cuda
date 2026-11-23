@@ -31,6 +31,8 @@ struct cuda_view;
 
 struct cuda_registry;
 
+class cuda_runtime_view;
+
 /**
  * @brief CUDA query result. Snapshot descriptors and dispatch on each call.
  * @tparam Type Required component types, possibly const-qualified.
@@ -44,7 +46,61 @@ struct cuda_view {
     template<typename Func>
     cudaError_t each(Func fn, cudaStream_t stream = nullptr, cudaEvent_t done = nullptr) const;
 
+    /*! @brief Checks whether an entity matches every required and no excluded pool. */
+    [[nodiscard]] bool contains(const entity value) const {
+        const auto required = std::apply([&](auto *...component) { return (component->contains(value) && ...); }, storages);
+        const auto excluded = std::none_of(excluded_pools.begin(), excluded_pools.end(), [&](const auto *pool) { return pool->contains(value); });
+        return required && excluded;
+    }
+
+    /*! @brief Returns the number of candidate entities for this query. */
+    [[nodiscard]] std::size_t size_hint() const {
+        if constexpr(sizeof...(Type) == 0u) {
+            return registry ? static_cast<std::size_t>(registry->identity.free_list()) : 0u;
+        } else {
+            return std::apply([](auto *...component) { return std::min({component->size()...}); }, storages);
+        }
+    }
+
+    /*! @brief Re-binds the query to a registry after the owner has been moved. */
+    void rebind(cuda_registry &other) noexcept {
+        registry = &other;
+    }
+
+    /*! @brief Iterates matching entities on the host, without component values. */
+    template<typename Func>
+    void each_entity(Func fn) const {
+        if constexpr(sizeof...(Type) == 0u) {
+            const auto count = registry ? static_cast<std::size_t>(registry->identity.free_list()) : 0u;
+            const auto *entities = registry ? registry->identity.data() : nullptr;
+
+            for(std::size_t pos = 0u; pos < count; ++pos) {
+                if(contains(entities[pos])) {
+                    fn(entities[pos]);
+                }
+            }
+        } else {
+            const auto *candidate = smallest_pool();
+
+            for(std::size_t pos = 0u; pos < candidate->size(); ++pos) {
+                if(contains(candidate->data()[pos])) {
+                    fn(candidate->data()[pos]);
+                }
+            }
+        }
+    }
+
 private:
+    [[nodiscard]] const internal::cuda_pool_base *smallest_pool() const {
+        const internal::cuda_pool_base *result = nullptr;
+        std::apply([&](auto *...component) {
+            const internal::cuda_pool_base *pools[] = {static_cast<const internal::cuda_pool_base *>(component)...};
+            result = *std::min_element(std::begin(pools), std::end(pools), [](const auto *lhs, const auto *rhs) { return lhs->size() < rhs->size(); });
+        },
+                   storages);
+        return result;
+    }
+
     template<typename Func, std::size_t... Index>
     cudaError_t dispatch(Func fn, cudaStream_t stream, cudaEvent_t done, std::index_sequence<Index...>) const;
 };
@@ -59,6 +115,8 @@ private:
 struct cuda_registry {
     template<typename...>
     friend struct cuda_view;
+
+    friend class cuda_runtime_view;
 
     /*! @brief Reused upstream identity storage (generation + free list). */
     using identity_storage = basic_storage<entity>;
@@ -77,6 +135,14 @@ struct cuda_registry {
     using common_type = internal::cuda_pool_base;
     /*! @brief General purpose host context. */
     using context = internal::registry_context<allocator_type>;
+    /*! @brief Mutable pool enumeration. */
+    using iterable = internal::cuda_pool_range<pool_container::iterator, internal::cuda_pool_base>;
+    /*! @brief Constant pool enumeration. */
+    using const_iterable = internal::cuda_pool_range<pool_container::const_iterator, const internal::cuda_pool_base>;
+
+    /*! @brief Typed storage type, preserving constness. */
+    template<typename Type>
+    using storage_for_type = cuda_storage<std::remove_const_t<Type>>;
 
     identity_storage identity;
     pool_container pools;
@@ -313,11 +379,45 @@ struct cuda_registry {
     template<typename... Type, typename... Exclude>
     [[nodiscard]] cuda_view<Type...> view(exclude_t<Exclude...> = exclude_t{});
 
+    /*! @brief Returns a runtime view bound to this registry. */
+    [[nodiscard]] cuda_runtime_view runtime_view() noexcept;
+
     template<typename Type>
     requires internal::cuda_component<Type>
-    [[nodiscard]] cuda_storage<Type> &storage() {
-        return pool<Type>();
+    [[nodiscard]] cuda_storage<Type> &storage(const id_type id = type_hash<Type>::value()) {
+        return pool<Type>(id);
     }
+
+    template<typename Type>
+    requires internal::cuda_component<Type>
+    [[nodiscard]] const cuda_storage<Type> *storage(const id_type id = type_hash<Type>::value()) const {
+        return find_pool<Type>(id);
+    }
+
+    /*! @brief Returns a type-erased pool by id, or null if absent. */
+    [[nodiscard]] common_type *storage(const id_type id) noexcept {
+        const auto it = pools.find(id);
+        return (it != pools.end()) ? it->second.get() : nullptr;
+    }
+
+    /*! @brief Returns a type-erased pool by id, or null if absent. */
+    [[nodiscard]] const common_type *storage(const id_type id) const noexcept {
+        const auto it = pools.find(id);
+        return (it != pools.end()) ? it->second.get() : nullptr;
+    }
+
+    /*! @brief Enumerates component pools, excluding the entity storage. */
+    [[nodiscard]] iterable storage() noexcept {
+        return iterable{pools.begin(), pools.end()};
+    }
+
+    /*! @brief Enumerates component pools, excluding the entity storage. */
+    [[nodiscard]] const_iterable storage() const noexcept {
+        return const_iterable{pools.begin(), pools.end()};
+    }
+
+    /*! @brief Removes a component pool, retiring its device allocations. */
+    cudaError_t reset(const id_type id, cudaStream_t stream = nullptr);
 
     /*! @brief Returns the context object. */
     [[nodiscard]] context &ctx() noexcept {
@@ -343,13 +443,12 @@ private:
     }
 
     template<typename Type>
-    [[nodiscard]] cuda_storage<Type> &pool();
+    [[nodiscard]] cuda_storage<Type> &pool(const id_type id = type_hash<Type>::value());
 
     template<typename Type>
-    [[nodiscard]] const cuda_storage<Type> *find_pool() const noexcept {
-        const auto key = type_hash<Type>::value();
-        const auto it = pools.find(key);
-        return (it != pools.end()) ? static_cast<const cuda_storage<Type> *>(it->second.get()) : nullptr;
+    [[nodiscard]] const cuda_storage<Type> *find_pool(const id_type id = type_hash<Type>::value()) const noexcept {
+        const auto it = pools.find(id);
+        return (it != pools.end() && it->second->type() == type_hash<Type>::value()) ? static_cast<const cuda_storage<Type> *>(it->second.get()) : nullptr;
     }
 
     template<typename Type>
@@ -557,18 +656,31 @@ inline cudaError_t cuda_registry::destroy(It first, It last, cudaStream_t stream
 }
 
 template<typename Type>
-[[nodiscard]] inline cuda_storage<Type> &cuda_registry::pool() {
+[[nodiscard]] inline cuda_storage<Type> &cuda_registry::pool(const id_type id) {
     static_assert(!std::is_const_v<Type>, "Pool types are unqualified and non-const");
-    const auto key = type_hash<Type>::value();
 
-    if(const auto it = pools.find(key); it != pools.end()) {
+    if(const auto it = pools.find(id); it != pools.end()) {
+        ENTT_ASSERT(it->second->type() == type_hash<Type>::value(), "Unexpected type");
         return static_cast<cuda_storage<Type> &>(*it->second);
     }
 
     auto ptr = std::make_unique<cuda_storage<Type>>(retirement);
     auto *raw = ptr.get();
-    pools.emplace(key, std::move(ptr));
+    pools.emplace(id, std::move(ptr));
     return *raw;
+}
+
+inline cudaError_t cuda_registry::reset(const id_type id, cudaStream_t stream) {
+    if(const auto err = fault; err != cudaSuccess) {
+        return err;
+    }
+
+    if(const auto it = pools.find(id); it != pools.end()) {
+        it->second->reset(stream);
+        pools.erase(it);
+    }
+
+    return cudaSuccess;
 }
 
 inline cudaError_t cuda_registry::upload_identity(std::size_t &count, const entity *&out, cudaStream_t stream) {
@@ -1049,6 +1161,90 @@ template<typename... Type, typename... Exclude>
     return result;
 }
 
+/**
+ * @brief Generic runtime view dispatching entity identifiers only.
+ *
+ * Required and excluded pools are added at runtime. The device callback receives
+ * only the entity identifier; there is no runtime device compilation.
+ */
+class cuda_runtime_view {
+    cuda_registry *registry{};
+    std::vector<internal::cuda_pool_base *> pools;
+    std::vector<internal::cuda_pool_base *> filter;
+
+public:
+    cuda_runtime_view() = default;
+    explicit cuda_runtime_view(cuda_registry *owner) noexcept
+        : registry{owner} {}
+
+    /*! @brief Adds the default-named pool of the given type, keeping the smallest first. */
+    template<typename Type>
+    cuda_runtime_view &iterate() {
+        auto *component = static_cast<internal::cuda_pool_base *>(&registry->storage<Type>());
+
+        if(pools.empty() || component->size() >= pools.front()->size()) {
+            pools.push_back(component);
+        } else {
+            pools.push_back(std::exchange(pools.front(), component));
+        }
+
+        return *this;
+    }
+
+    /*! @brief Adds an opaque pool, keeping the smallest first. */
+    cuda_runtime_view &iterate(internal::cuda_pool_base &base) {
+        if(pools.empty() || base.size() >= pools.front()->size()) {
+            pools.push_back(&base);
+        } else {
+            pools.push_back(std::exchange(pools.front(), &base));
+        }
+
+        return *this;
+    }
+
+    /*! @brief Adds the default-named pool of the given type as a filter. */
+    template<typename Type>
+    cuda_runtime_view &exclude() {
+        filter.push_back(&registry->storage<Type>());
+        return *this;
+    }
+
+    /*! @brief Adds an opaque pool as a filter. */
+    cuda_runtime_view &exclude(internal::cuda_pool_base &base) {
+        filter.push_back(&base);
+        return *this;
+    }
+
+    /*! @brief Clears the view. */
+    void clear() noexcept {
+        pools.clear();
+        filter.clear();
+    }
+
+    /*! @brief Estimates the number of entities iterated by the view. */
+    [[nodiscard]] std::size_t size_hint() const noexcept {
+        return pools.empty() ? 0u : pools.front()->size();
+    }
+
+    /*! @brief Checks if the view contains an entity. */
+    [[nodiscard]] bool contains(const entity value) const noexcept {
+        return std::all_of(pools.begin(), pools.end(), [&](const auto *pool) { return pool->contains(value); })
+               && std::none_of(filter.begin(), filter.end(), [&](const auto *pool) { return pool && pool->contains(value); });
+    }
+
+    /*! @brief Checks whether the view is initialized. */
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return !(pools.empty() && filter.empty());
+    }
+
+    template<typename Func>
+    cudaError_t each(Func fn, cudaStream_t stream = nullptr, cudaEvent_t done = nullptr) const;
+};
+
+[[nodiscard]] inline cuda_runtime_view cuda_registry::runtime_view() noexcept {
+    return cuda_runtime_view{this};
+}
+
 #ifdef __CUDACC__
 
 template<typename Type, typename... Func>
@@ -1131,6 +1327,60 @@ cudaError_t cuda_view<Type...>::dispatch(Func fn, cudaStream_t stream, cudaEvent
         const auto block = 256u;
         const auto grid = static_cast<unsigned>((count + block - 1u) / block);
         internal::cuda_view_each_kernel<<<grid, block, 0, stream>>>(fn, count, candidate, reqs, excluded_params);
+
+        if(const auto err = cudaGetLastError(); err != cudaSuccess) {
+            return registry->fail(err);
+        }
+    }
+
+    if(done != nullptr) {
+        if(const auto err = cudaEventRecord(done, stream); err != cudaSuccess) {
+            return registry->fail(err);
+        }
+    }
+
+    return cudaSuccess;
+}
+
+template<typename Func>
+cudaError_t cuda_runtime_view::each(Func fn, cudaStream_t stream, cudaEvent_t done) const {
+    if(registry == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+
+    if(const auto err = registry->fault; err != cudaSuccess) {
+        return err;
+    }
+
+    std::size_t count{};
+    const entity *candidate{};
+
+    if(pools.empty()) {
+        if(const auto err = registry->upload_identity(count, candidate, stream); err != cudaSuccess) {
+            return registry->fail(err);
+        }
+    } else {
+        count = pools.front()->size();
+        candidate = pools.front()->packed_device();
+    }
+
+    internal::cuda_runtime_params params{};
+    params.required_count = std::min(pools.size(), internal::cuda_max_exclude);
+
+    for(std::size_t pos = 0u; pos < params.required_count; ++pos) {
+        params.required[pos] = pools[pos]->pages();
+    }
+
+    params.excluded_count = std::min(filter.size(), internal::cuda_max_exclude);
+
+    for(std::size_t pos = 0u; pos < params.excluded_count; ++pos) {
+        params.excluded[pos] = filter[pos]->pages();
+    }
+
+    if(count != 0u) {
+        const auto block = 256u;
+        const auto grid = static_cast<unsigned>((count + block - 1u) / block);
+        internal::cuda_runtime_each_kernel<<<grid, block, 0, stream>>>(fn, count, candidate, params);
 
         if(const auto err = cudaGetLastError(); err != cudaSuccess) {
             return registry->fail(err);

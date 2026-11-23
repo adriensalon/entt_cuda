@@ -64,6 +64,14 @@ struct cuda_exclude_params {
     std::size_t count;
 };
 
+/*! @brief Kernel-parameter bundle for runtime views (required + excluded pools). */
+struct cuda_runtime_params {
+    const entity *const *required[cuda_max_exclude];
+    std::size_t required_count;
+    const entity *const *excluded[cuda_max_exclude];
+    std::size_t excluded_count;
+};
+
 #ifdef __CUDACC__
 
 /*! @brief Resolves the dense index of an entity in a device sparse table. */
@@ -155,6 +163,32 @@ __global__ void cuda_patch_kernel(const entity *const *pages, Type *payload, con
     }
 
     (funcs(payload[idx]), ...);
+}
+
+/*! @brief One-thread-per-candidate dispatch kernel for runtime views. */
+template<typename Func>
+__global__ void cuda_runtime_each_kernel(Func fn, const std::size_t count, const entity *candidate, cuda_runtime_params params) {
+    const auto pos = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+
+    if(pos >= count) {
+        return;
+    }
+
+    const entity value = candidate[pos];
+
+    for(std::size_t idx = 0u; idx < params.required_count; ++idx) {
+        if(!cuda_sparse_contains(params.required[idx], value)) {
+            return;
+        }
+    }
+
+    for(std::size_t idx = 0u; idx < params.excluded_count; ++idx) {
+        if(cuda_sparse_contains(params.excluded[idx], value)) {
+            return;
+        }
+    }
+
+    fn(value);
 }
 
 #endif // __CUDACC__
