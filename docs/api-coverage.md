@@ -9,9 +9,11 @@ modules are excluded. The upstream submodule is unchanged.
 
 **Contract** means declarations/compile checks only, with no runtime definition.
 **Deferred** means neither an implemented CUDA adaptation nor a public promise
-beyond the roadmap. Deleted copy operations and emplacement argument forwarding
-are implemented. No registry runtime row is complete in phase 0. Phases are
-delivery gates, not estimates.
+beyond the roadmap. **Implemented** means a runtime definition exists and is
+covered by a runtime test. Deleted copy operations and emplacement argument
+forwarding are implemented. The phase-1 asynchronous core (identity, pools,
+emplacement, removal, transfers and dispatch) is implemented; remaining rows
+stay contract/deferred. Phases are delivery gates, not estimates.
 
 ## Registry declarations
 
@@ -21,41 +23,41 @@ delivery gates, not estimates.
 | `common_type` 274; `context` 276 | Deferred: erased CUDA metadata interface and upstream host context. | 2-3 |
 | `iterable` 278; `const_iterable` 280 | Deferred: mutable/const pool enumeration excluding entity storage. | 3 |
 | `storage_for_type<T>` 287 | Deferred: normalized typed CUDA storage, preserving constness. | 2-3, 6 |
-| Default constructor 290 | Contract: declared, no runtime definition. | 1 |
+| Default constructor 290 | Implemented: default-constructs host identity and an empty pool map; no device submission. | 1 |
 | Explicit allocator constructor 297 | Deferred: host allocator customization. | 2, 6 |
 | `(size_type count, allocator = {})` constructor 305 | Deferred: count reserves pool-map entries, not entity/component slots. | 2, 6 |
 | Copy constructor 315; copy assignment 336 | Implemented as deleted operations; compile checks reject copying. | 0 |
-| Move constructor 321; move assignment 343 | Contract: `noexcept` declarations; ownership/outstanding work transfer unimplemented. | 1-2 |
-| Destructor 330 | Contract: declaration; blocking, nonthrowing teardown still unimplemented. | 1 |
+| Move constructor 321; move assignment 343 | Implemented: `noexcept` transfer of identity, pools, retirement and device buffers; pool retirement bookkeeping is re-bound to the new owner. | 1-2 |
+| Destructor 330 | Implemented: blocking, nonthrowing teardown drains retired work and frees live device buffers. | 1 |
 | `swap` 352; `get_allocator() const` 368 | Deferred: transfer ownership/bookkeeping; report host allocator. | 2, 6 |
 | `storage()` mutable 380 and const 385 | Deferred: enumerate component pool IDs/interfaces only. | 3 |
 | `storage(id)` mutable 394 and const 403 | Deferred: nullable erased lookup, no pool creation. | 3 |
-| `storage<T>(id = type_hash<T>)` mutable 415 and const 426 | Contract for mutable default-name access only. Named and nullable const access deferred; entity storage ignores names. | 1-3 |
+| `storage<T>(id = type_hash<T>)` mutable 415 and const 426 | Implemented for mutable default-name access only. Named and nullable const access deferred; entity storage ignores names. | 1-3 |
 | `reset(id)` 435 | Deferred: native stream/event extension, status return, safe retirement; reject entity storage. | 3 |
 | `valid(e) const` 445; `current(e) const` 455 | Deferred: CPU full-generation validation/version lookup. | 2 |
-| `create()` 463 | Contract; host allocation/exhaustion policy settled in contracts.md. | 1 |
+| `create()` 463 | Implemented: CPU-only generation with free-list recycling; throws `std::bad_alloc`/`std::length_error` per contracts.md. | 1 |
 | `create(hint)` 476; output-iterator `create(first,last)` 490 | Deferred: upstream null/tombstone, generation/hint and output-range semantics. | 2 |
-| `destroy(e)` 504 | Contract: native stream/event parameters, `cudaError_t` instead of version; resulting version later queried with `current`. | 1 |
+| `destroy(e)` 504 | Implemented: native stream/event parameters, `cudaError_t` instead of version; removes every component then recycles the ID. | 1 |
 | `destroy(e,version)` 525; input-iterator `destroy(first,last)` 539 | Deferred: status returns and native stream/event placement, retained range inputs. | 2 |
-| `emplace<T>(e,args...)` 566 | Implemented forwarding for all three core stream/event overloads; leaf submission is contract-only. Aggregate/handle/null cases compile-tested. | 0-1 |
+| `emplace<T>(e,args...)` 566 | Implemented: all three core stream/event overloads forward to runtime staged upload, growth and sparse/dense device mirroring. Aggregate/handle/null cases compile-tested. | 0-1 |
 | `insert<T>(first,last,value = {})` 582 | Deferred: repeated/default value staging and validation. | 2 |
 | `insert<T>(first,last,components_first)` constrained to matching value type, 601 | Deferred: copy parallel inputs before return; caller supplies enough values. | 2 |
 | `emplace_or_replace<T>` 619 | Deferred: status-returning replace-or-create. | 2 |
 | `patch<T>(e,funcs...)` 645 | Deferred: device-callable ordered functions; empty pack is notification-only; immutable entity identity. | 2, 5 |
 | `replace<T>` 665 | Deferred: staged replacement, no host reference result. | 2 |
-| `remove<T,Other...>(e)` 677 | Contract for scalar type only, including const-type normalization; tolerant removal and status return. | 1-2 |
+| `remove<T,Other...>(e)` 677 | Implemented for scalar type only, including const-type normalization; tolerant swap-and-pop removal and status return. | 1-2 |
 | `remove<T,Other...>(first,last)` 694 | Deferred: retained scalar/range/multi-type submission. | 2 |
 | `erase<T,Other...>(e)` 731 and `(first,last)` 747 | Deferred: strict validation/removal; status return. | 2 |
 | `erase_if(e,func)` 783 | Deferred: predicate sees pool ID and const host metadata; no device values. | 2 |
 | `compact<T...>()` 797, including empty pack | Deferred: device relocation/map repair; compact pools succeed as no-ops. | 4 |
 | `all_of<T...>(e) const` 814; `any_of<T...>(e) const` 831 | Deferred: const-normalized host membership; true/false respectively for empty packs, as checked in the CPU reference test. | 2 |
-| `get<T...>(e) const` 847 and mutable 857 | Contract for mutable scalar pinned download. Const and multi-type/tuple destinations deferred; validate all destinations before copies, one final event. Host component reference overloads deliberately unavailable. | 1-2 |
+| `get<T...>(e) const` 847 and mutable 857 | Implemented for mutable scalar pinned download. Const and multi-type/tuple destinations deferred; validate all destinations before copies, one final event. Host component reference overloads deliberately unavailable. | 1-2 |
 | `get_or_emplace<T>` 881 | Deferred: ensure-only status return; separate download/device lookup for access. | 2 |
 | `try_get<T...>(e) const` 898 and mutable 909 | Deferred: nullable device pointers/tuples with const propagation; no host references, downloads or tag value pointers. | 2 |
 | `clear<T...>()` 922, including empty pack | Deferred: selected pools retain entities; whole-registry clear destroys live IDs and retains pools/context. | 2 |
 | `orphan(e) const` 940 | Deferred: includes every named pool. | 2 |
 | `on_construct<T>(id)` 964; `on_update<T>(id)` 988; `on_destroy<T>(id)` 1012 | Deferred: default/named/entity sinks, logical submission notifications with triggering stream. | 5 |
-| `view<T,Other...>(exclude_t<U...> = {}) const` 1025 and mutable 1034 | Contract for mutable queries with requested const types and exclusions. Const-registry overload deferred. Empty required packs are a deliberate CUDA extension for entity/exclude-only dispatch; device execution/rebinding not implemented. | 1-3 |
+| `view<T,Other...>(exclude_t<U...> = {}) const` 1025 and mutable 1034 | Implemented for mutable queries with requested const types and exclusions, including entity-only/exclude-only dispatch and both callback forms. Const-registry overload deferred. Empty required packs are a deliberate CUDA extension; excluded pools are bounded to a documented compile-time maximum. | 1-3 |
 | `group<Owned...>(get_t<Get...> = {},exclude_t<U...> = {})` 1047 | Deferred: non-owning first, then partial/full ownership and device permutations. | 4 |
 | `group_if_exists<Owned...>(...) const` 1071 | Deferred: nullable lookup without group/pool creation. | 4 |
 | `owned<T...>() const` 1089 | Deferred: host ownership queries/conflict checks. | 4 |
@@ -102,8 +104,8 @@ for each owner must accompany its delivery gate.
 ## Explicit adaptations and exclusions
 
 - `assign` is a CUDA upload extension. There is no upstream registry method to
-  audit. Its signature is declared; implementation is phase 1, notification
-  behavior phase 5. No redundant transfer aliases are added.
+  audit. Its signature is declared and its runtime upload is implemented in phase
+  1; notification behavior is phase 5. No redundant transfer aliases are added.
 - Native `cudaError_t` replaces values/references/counts from enqueueing upstream
   operations. Host metadata queries keep ordinary result types. Native
   stream/event parameters follow the core placement convention.
@@ -116,10 +118,10 @@ for each owner must accompany its delivery gate.
 - GPU-origin structural commands, multiple devices, nontrivial device lifecycles
   and automatic device change detection require later separate designs.
 
-## Verification recorded at phase 0
+## Verification recorded at phase 0/1
 
 `api_contract.cu` compiles the actual core overloads and both callback signature
-forms into an object without linking the unfinished registry. `host_contract.cpp`
+forms into an object; it links against the runtime registry. `host_contract.cpp`
 checks dependency identity and empty-pack expectations adapted from upstream
 registry tests; it is not a CUDA-registry parity test. `dependency_contract.cu`
 checks C++20 parsing and instantiation of the reused upstream identity storage,
@@ -127,5 +129,11 @@ type IDs, zero-SBO context/reference aliases and signals under nvcc 13.2. Full C
 registry instantiation remains in the host translation unit because its nonzero
 SBO `basic_any` union triggers an nvcc diagnostic. `toolchain.cu` checks an
 extended device lambda, pinned transfers and native nonblocking-stream/event
-handoff. CUDA-registry randomized comparisons, fault injection and Compute
-Sanitizer remain pending phase 1.
+handoff; it passes on this workspace's GTX 1650 with driver 621.24 and the
+workspace-local CUDA 13.2 toolkit. `registry_core.cu` exercises the phase-1 core
+(`emplace -> each -> get`, relocation across growth and sparse-page boundaries,
+tolerant removal, tags/exclusions, both callback forms, entity-only and empty
+required pools, destroy with version recycling, cross-stream handoff and move
+construction) and reports clean under Compute Sanitizer memcheck. `registry_fault.cu`
+checks the sticky fault state, and `registry_parity.cpp` compares 3000 randomized
+edit/query steps against the CPU EnTT reference with bit-exact agreement.

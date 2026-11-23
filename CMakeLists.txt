@@ -16,7 +16,7 @@ add_library(EnTT::Cuda ALIAS EnTTCuda)
 
 target_include_directories(EnTTCuda INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(EnTTCuda INTERFACE cxx_std_20 cuda_std_20)
-target_compile_options(EnTTCuda INTERFACE "$<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:--extended-lambda>")
+target_compile_options(EnTTCuda INTERFACE "$<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:--extended-lambda;--expt-relaxed-constexpr>")
 target_link_libraries(EnTTCuda INTERFACE EnTT::EnTT CUDA::cudart)
 
 option(ENTT_CUDA_BUILD_TESTING "Build the CUDA registry contract and toolchain tests." ${PROJECT_IS_TOP_LEVEL})

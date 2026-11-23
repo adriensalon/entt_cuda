@@ -12,3 +12,20 @@ target_compile_definitions(entt_cuda_toolchain PRIVATE "$<$<BOOL:${ENTT_CUDA_REQ
 set_target_properties(entt_cuda_toolchain PROPERTIES CUDA_STANDARD_REQUIRED YES CXX_STANDARD_REQUIRED YES)
 add_test(NAME entt_cuda.toolchain COMMAND entt_cuda_toolchain)
 set_tests_properties(entt_cuda.toolchain PROPERTIES SKIP_RETURN_CODE 77 LABELS "cuda;runtime")
+
+add_executable(entt_cuda_registry_core registry_core.cu)
+target_link_libraries(entt_cuda_registry_core PRIVATE EnTT::Cuda)
+set_target_properties(entt_cuda_registry_core PROPERTIES CUDA_STANDARD_REQUIRED YES CXX_STANDARD_REQUIRED YES)
+add_test(NAME entt_cuda.registry_core COMMAND entt_cuda_registry_core)
+set_tests_properties(entt_cuda.registry_core PROPERTIES SKIP_RETURN_CODE 77 LABELS "cuda;runtime")
+
+add_executable(entt_cuda_registry_fault registry_fault.cu)
+target_link_libraries(entt_cuda_registry_fault PRIVATE EnTT::Cuda)
+set_target_properties(entt_cuda_registry_fault PROPERTIES CUDA_STANDARD_REQUIRED YES CXX_STANDARD_REQUIRED YES)
+add_test(NAME entt_cuda.registry_fault COMMAND entt_cuda_registry_fault)
+set_tests_properties(entt_cuda.registry_fault PROPERTIES SKIP_RETURN_CODE 77 LABELS "cuda;runtime")
+
+add_executable(entt_cuda_registry_parity registry_parity.cpp)
+target_link_libraries(entt_cuda_registry_parity PRIVATE EnTT::Cuda)
+add_test(NAME entt_cuda.registry_parity COMMAND entt_cuda_registry_parity)
+set_tests_properties(entt_cuda.registry_parity PROPERTIES SKIP_RETURN_CODE 77 LABELS "host;runtime")

@@ -3,10 +3,14 @@
 An EnTT-style CUDA registry with host-owned identity/structure and GPU-authoritative
 component values. See [AGENTS.md](AGENTS.md) for the roadmap.
 
-**Current status: phase-0 contracts/build foundation.** The core declarations and
-emplacement forwarding compile, but registry runtime definitions start in phase 1.
-Constructing/linking a `cuda_registry` is not supported yet. Phase 0 remains open
-until the selected toolchain's GPU test runs successfully.
+**Current status: phase 1 (asynchronous core) complete.** Host identity, device
+pools/sparse pages, emplacement, swap-and-pop removal, transfers, and typed device
+dispatch (`view<T...>().each`) work end-to-end, with safe allocation retirement,
+fault tracking and teardown. Acceptance is covered by `registry_core.cu`
+(dispatch/relocation/tags/callbacks/handoffs/moves), `registry_fault.cu` (sticky
+fault state) and `registry_parity.cpp` (randomized parity against the CPU EnTT
+reference), all clean under Compute Sanitizer. Later gates (registry breadth,
+groups, order, reactivity, persistence) remain pending.
 
 The compatibility reference is EnTT revision
 `1dcd7aab6548786f7672ff578639188bd2f0d837` (declaring 4.1.0). The submodule is
@@ -56,29 +60,38 @@ toolkit's `bin` on `PATH` when running executables linked to its shared runtime.
 
 Consumers use `add_subdirectory(...)`, link `EnTT::Cuda`, and include
 `<entt/entt_cuda.hpp>`. Device callbacks require CUDA translation units. Installation
-and exported-package support are deferred; there is no usable registry runtime
-to package yet.
+and exported-package support are deferred.
 
 ## Validation and toolchain limits
 
 - The CUDA object target compiles the actual three core emplacement overloads,
   aggregates, native/null handles, handle-like constructors, invalid component
-  rejection, transfer signatures, exclusions and callback signatures. It does
-  not link unfinished registry operations or validate kernel invocation yet.
+  rejection, transfer signatures, exclusions and callback signatures.
 - A second CUDA source instantiates the reused upstream host identity storage,
   type IDs, host context/reference alias and signal facilities. The CPU EnTT
   registry reference is instantiated in a normal C++ test.
-- The runtime smoke test launches an extended device lambda and checks pinned
-  upload/download with two nonblocking streams and native event handoff. It
-  does not use an implemented CUDA registry.
+- `registry_core.cu` exercises the implemented registry: `emplace -> each -> get`
+  on one stream, GPU values surviving growth and swap-and-pop relocation across a
+  sparse-page boundary, `assign`/`get` round trips, tolerant removal, tags,
+  exclusions, entity-only and empty required pools, both callback forms, destroy
+  with version recycling, cross-stream handoff and move construction. It reports
+  clean under Compute Sanitizer memcheck (0 errors, 0 leaked allocations).
+- `registry_fault.cu` verifies the sticky fault state: validation rejections
+  return `cudaErrorInvalidValue` without faulting, a stale-stream submission
+  faults the registry, every later status-returning operation reports the saved
+  error, `create()` throws `std::logic_error`, and teardown stays safe.
+- `registry_parity.cpp` drives 3000 randomized create/destroy/emplace/remove/
+  assign steps against a CPU `entt::registry` reference and compares membership
+  and downloaded values bit-exactly. It lives in a host translation unit because
+  nvcc 13.2 rejects the upstream CPU registry's `basic_any` SBO union.
+- `toolchain.cu` keeps the standalone extended-lambda and pinned transfer smoke
+  test as a driver/runtime canary.
 
-On this workspace, the CUDA 13.2 Debug build and host test pass. Its GPU test
-skips: driver 532.09 reports CUDA driver API 12.1 and cannot run the CUDA 13
-runtime. The same standalone kernel/transfer smoke test compiled with the
-installed CUDA 12.4 toolkit ran successfully on the GTX 1650; this does not
-validate the chosen CUDA 13.2 runtime or a CUDA registry. A compatible driver
-and a passing strict GPU test are required to close phase 0. NVIDIA documents
-CUDA 13's driver requirements in its
+On this workspace, the CUDA 13.2 Debug build, host test and GPU runtime test all
+pass. The GPU test previously skipped under driver 532.09 (CUDA driver API 12.1),
+which could not run the CUDA 13 runtime; driver 621.24 (CUDA user-mode 13.5) now
+runs the same workspace-local CUDA 13.2 toolkit (nvcc 13.2.51) on the GTX 1650.
+This closes phase 0. NVIDIA documents CUDA 13's driver requirements in its
 [compatibility guide](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html).
 
 nvcc 12.4.131 and 12.9.86 both reject `core/hashed_string.hpp:122` in the pinned

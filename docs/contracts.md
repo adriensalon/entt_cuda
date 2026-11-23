@@ -1,9 +1,10 @@
 # Phase-0 contracts
 
-This records decisions for the implementation gates in `AGENTS.md`. The current
-headers provide a compile-only core API contract. They do not yet provide a
-constructible, linkable CUDA registry. Runtime definitions, device storage and
-submission bookkeeping start in phase 1. No placeholder returns `cudaSuccess`.
+This records decisions for the implementation gates in `AGENTS.md`. The phase-1
+asynchronous core now provides a constructible, linkable CUDA registry that
+implements these contracts: host identity, device pools/sparse pages, staged
+emplacement, swap-and-pop removal, transfers, typed dispatch, allocation
+retirement, fault tracking and teardown. No placeholder returns `cudaSuccess`.
 
 ## Dependency and language
 
@@ -15,18 +16,21 @@ version-header hashes even in source archives. The gitlink pins the other ECS
 headers. Public declaration coverage is recorded in [api-coverage.md](api-coverage.md).
 
 Both host and CUDA translation units require C++20. `EnTT::Cuda` supplies the
-include paths, upstream `EnTT::EnTT`, native CUDA runtime linkage and
-`--extended-lambda` for NVIDIA CUDA compilation. Kernel and callback definitions
-will remain visible to the CUDA compiler. Host metadata APIs remain callable
-from ordinary C++ translation units. No public execution wrappers are planned.
+include paths, upstream `EnTT::EnTT`, native CUDA runtime linkage,
+`--extended-lambda` and `--expt-relaxed-constexpr` for NVIDIA CUDA compilation.
+Kernel and callback definitions remain visible to the CUDA compiler. Host
+metadata APIs remain callable from ordinary C++ translation units; the device
+dispatch and transfer definitions are guarded with `__CUDACC__`. No public
+execution wrappers are planned.
 
 The selected baseline is NVIDIA nvcc 13.2+; the checked host compiler is MSVC
 19.44.35229. Earlier local nvcc 12.4/12.9 builds reject the pinned hashed-string
 header. The upstream facilities reused here compile with nvcc 13.2, while full
 CPU-registry instantiation stays in host translation units because its nonzero
-SBO union triggers a separate diagnostic. See README.md for reproduction and
-the currently unmet CUDA 13 runtime driver requirement. The compile and host
-checks pass; this GPU runtime validation gap keeps phase 0 open.
+SBO union triggers a separate diagnostic. See README.md for the verified
+toolchain/driver combination. The compile, host and GPU runtime checks all pass
+on this workspace; the phase-1 registry core additionally reports clean under
+Compute Sanitizer memcheck.
 
 ## Emplacement argument placement
 
@@ -57,10 +61,11 @@ completion event. These choices avoid component-dependent interpretation of
 `nullptr`. Construction uses braces, including aggregate initialization and its
 usual narrowing restrictions.
 
-The phase-0 object test instantiates actual forwarding bodies for these cases.
-Runtime leaf operations are intentionally undefined until phase 1. Query calls
-are compile-only signature checks; device callback invocation and const-reference
-rejection must be tested against the actual phase-1 dispatch kernel.
+The phase-0 object test instantiates actual forwarding bodies for these cases;
+the phase-1 `registry_core` test now exercises the runtime leaf operations.
+Device callback invocation, both callback forms and const-reference rejection are
+validated against the actual dispatch kernel. Const-type rejection for
+`emplace<const T>` and empty-tag transfer rejection remain compile-time checks.
 
 ## Component and raw-access policy
 
@@ -191,11 +196,15 @@ ownership and outstanding bookkeeping; existing views/handles must be reacquired
 
 ## Acceptance boundaries
 
-Phase 0 validates header integration, overload resolution, restrictions, the
-pinned CPU reference, native CUDA execution and extended lambdas. It does not
-validate a registry implementation. Phase 1 must add same-stream
-`emplace -> each -> get`, GPU-written value relocation, generation/sparse-page
-boundaries, empty/tag/excluded queries, callback forms, cross-stream handoffs,
-no-event staging/retirement, teardown and fault injection. Randomized comparisons
-and Compute Sanitizer apply when those operations exist. Later-phase APIs remain
+Phase 0 validated header integration, overload resolution, restrictions, the
+pinned CPU reference, native CUDA execution and extended lambdas. Phase 1 now
+adds a same-stream `emplace -> each -> get` path, GPU-written value relocation,
+generation/sparse-page boundaries, empty/tag/excluded queries, both callback
+forms, cross-stream handoffs, no-event staging/retirement, moves and teardown,
+all covered by `registry_core.cu` and clean under Compute Sanitizer memcheck.
+`registry_fault.cu` exercises the sticky fault state (validation rejections do
+not fault; a submission failure faults; `create` throws; teardown stays safe),
+and `registry_parity.cpp` drives 3000 randomized create/destroy/emplace/remove/
+assign steps against the CPU EnTT reference with bit-exact membership and value
+agreement. Phase 1 is complete. Later-phase APIs remain
 explicitly deferred in the coverage inventory.
