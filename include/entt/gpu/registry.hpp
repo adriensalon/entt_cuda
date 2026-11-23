@@ -614,7 +614,7 @@ private:
 };
 
 template<typename Entity, typename Allocator, typename Backend>
-inline basic_gpu_registry<Entity, Allocator, Backend>::basic_gpu_registry<Entity, Allocator, Backend>(basic_gpu_registry<Entity, Allocator, Backend> &&other) noexcept
+inline basic_gpu_registry<Entity, Allocator, Backend>::basic_gpu_registry(basic_gpu_registry<Entity, Allocator, Backend> &&other) noexcept
     : identity{std::move(other.identity)},
       pools{std::move(other.pools)},
       owned_types{std::move(other.owned_types)},
