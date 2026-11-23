@@ -8,10 +8,10 @@ unchanged.
 ## Requirements
 
 - CMake 3.28 or newer
-- A C++20 host compiler (tested with MSVC)
+- C++20 host compiler
 - NVIDIA CUDA Toolkit 13.2 or newer
 - or AMD HIP SDK 6.x or newer for AMD GPUs (7.2 or newer for NVIDIA GPUs)
-- The pinned EnTT submodule, checked out with `git submodule update --init external/entt`
+- The pinned EnTT submodule
 
 `EnTT::Gpu` resolves to whichever backend is available, configuration fails if
 neither is.
@@ -21,8 +21,8 @@ neither is.
 Clone, build and run tests:
 
 ```powershell
-git clone https://github.com/adriensalon/entt_cuda.git entt_cuda
-cd entt_cuda
+git clone https://github.com/adriensalon/entt_gpu.git entt_gpu
+cd entt_gpu
 git submodule update --init external/entt
 cmake -S . -B build -DCMAKE_CUDA_ARCHITECTURES=75
 cmake --build build --config Debug
@@ -36,7 +36,7 @@ add_subdirectory(path/to/entt_gpu)
 target_link_libraries(my_target PRIVATE EnTT::Gpu)
 ```
 
-Use as a 'regular' EnTT registry:
+Use as a 'regular' EnTT registry with CUDA:
 
 ```cpp
 #include <cstdio>
