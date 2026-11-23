@@ -45,3 +45,8 @@ target_link_libraries(entt_cuda_registry_group PRIVATE EnTT::Cuda)
 set_target_properties(entt_cuda_registry_group PROPERTIES CUDA_STANDARD_REQUIRED YES CXX_STANDARD_REQUIRED YES)
 add_test(NAME entt_cuda.registry_group COMMAND entt_cuda_registry_group)
 set_tests_properties(entt_cuda.registry_group PROPERTIES SKIP_RETURN_CODE 77 LABELS "cuda;runtime")
+
+add_executable(entt_cuda_registry_reactivity registry_reactivity.cpp)
+target_link_libraries(entt_cuda_registry_reactivity PRIVATE EnTT::Cuda)
+add_test(NAME entt_cuda.registry_reactivity COMMAND entt_cuda_registry_reactivity)
+set_tests_properties(entt_cuda.registry_reactivity PROPERTIES SKIP_RETURN_CODE 77 LABELS "host;runtime")

@@ -3,13 +3,13 @@
 An EnTT-style CUDA registry with host-owned identity/structure and GPU-authoritative
 component values.
 
-**Current status: phase 4 (groups/order/policies) complete.** Phases 1-3 delivered
-the asynchronous core, registry breadth, and query/storage breadth. Phase 4 adds
-non-owning groups (cached matching entities), owning groups (owned pools arranged
-for aligned permutations with CPU/GPU slot agreement), `owned`, `group_if_exists`,
-`compact`, and entity/value `sort` plus `sort<To, From>`. Signal-driven
-incremental group maintenance stays pending, as do the later gates (reactivity,
-persistence, allocator customization).
+**Current status: phase 5 (reactivity/persistence) implemented.** Phases 1-4
+delivered the asynchronous core, registry breadth, query/storage breadth, and
+groups/order/policies. Phase 5 adds `on_construct`/`on_update`/`on_destroy` sinks
+(reusing `entt::sigh`/`sink`) with triggering-stream notifications and
+destroy-before-removal order, plus a `cuda_snapshot`/`cuda_snapshot_loader` full
+round-trip. Remaining: reactive version tracking, continuous/named snapshot
+mapping, allocator customization and `basic_cuda_registry` (phase 6).
 
 The compatibility reference is EnTT revision
 `1dcd7aab6548786f7672ff578639188bd2f0d837` (declaring 4.1.0). The submodule is
@@ -89,6 +89,9 @@ python tools/check-format.py --fix     # rewrite in place
 - `registry_group.cu` exercises the phase-4 surface: non-owning and owning groups,
   aligned permutations with CPU/GPU slot agreement, `owned`, `group_if_exists`,
   `compact`, entity/value `sort`, and `sort<To, From>`.
+- `registry_reactivity.cpp` exercises the phase-5 surface: `on_construct`/
+  `on_update`/`on_destroy` sinks (triggering stream, destroy-before-removal) and a
+  full snapshot/snapshot-loader round-trip.
 - `toolchain.cu` keeps the standalone extended-lambda and pinned transfer smoke
   test as a driver/runtime canary.
 

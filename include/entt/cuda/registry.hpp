@@ -18,6 +18,7 @@
 #include <entt/entity/entity.hpp>
 #include <entt/entity/registry.hpp>
 #include <entt/entity/storage.hpp>
+#include <entt/signal/sigh.hpp>
 #include "contract.hpp"
 #include "device.hpp"
 #include "storage.hpp"
@@ -129,6 +130,14 @@ struct cuda_registry {
     using identity_storage = basic_storage<entity>;
     /*! @brief Pool container keyed by type hash. */
     using pool_container = std::unordered_map<id_type, std::unique_ptr<internal::cuda_pool_base>>;
+    /*! @brief Signal type for logical submission notifications. */
+    using signal_type = sigh<void(cuda_registry &, entity, cudaStream_t)>;
+    /*! @brief Per-pool construct/update/destroy signals. */
+    struct cuda_pool_signals {
+        signal_type construct;
+        signal_type update;
+        signal_type destroy;
+    };
 
     /*! @brief Underlying entity identifier. */
     using entity_type = entity;
@@ -153,6 +162,7 @@ struct cuda_registry {
 
     identity_storage identity;
     pool_container pools;
+    std::unordered_map<id_type, cuda_pool_signals> signals;
     std::unordered_set<id_type> owned_types;
     internal::cuda_retirement retirement;
     context vars{allocator_type{}};
@@ -418,6 +428,24 @@ struct cuda_registry {
     template<typename To, typename From>
     cudaError_t sort(cudaStream_t stream = nullptr, cudaEvent_t done = nullptr);
 
+    /*! @brief Returns a sink notified after a component is constructed. */
+    template<typename Type>
+    [[nodiscard]] auto on_construct(const id_type id = type_hash<Type>::value()) {
+        return sink{signals[id].construct};
+    }
+
+    /*! @brief Returns a sink notified after a component is updated. */
+    template<typename Type>
+    [[nodiscard]] auto on_update(const id_type id = type_hash<Type>::value()) {
+        return sink{signals[id].update};
+    }
+
+    /*! @brief Returns a sink notified before a component is destroyed. */
+    template<typename Type>
+    [[nodiscard]] auto on_destroy(const id_type id = type_hash<Type>::value()) {
+        return sink{signals[id].destroy};
+    }
+
     template<typename Type>
     requires internal::cuda_component<Type>
     [[nodiscard]] cuda_storage<Type> &storage(const id_type id = type_hash<Type>::value()) {
@@ -476,6 +504,24 @@ private:
 
     static cudaError_t record_done(cudaEvent_t done, cudaStream_t stream) noexcept {
         return (done != nullptr) ? cudaEventRecord(done, stream) : cudaSuccess;
+    }
+
+    void publish_construct(const id_type id, const entity value, cudaStream_t stream) {
+        if(const auto it = signals.find(id); it != signals.end()) {
+            it->second.construct.publish(*this, value, stream);
+        }
+    }
+
+    void publish_update(const id_type id, const entity value, cudaStream_t stream) {
+        if(const auto it = signals.find(id); it != signals.end()) {
+            it->second.update.publish(*this, value, stream);
+        }
+    }
+
+    void publish_destroy(const id_type id, const entity value, cudaStream_t stream) {
+        if(const auto it = signals.find(id); it != signals.end()) {
+            it->second.destroy.publish(*this, value, stream);
+        }
     }
 
     template<typename Type>
@@ -634,6 +680,10 @@ inline cudaError_t cuda_registry::destroy(const entity value, cudaStream_t strea
     cudaError_t err = cudaSuccess;
 
     for(auto &&[key, pool]: pools) {
+        if(pool->contains(value)) {
+            publish_destroy(key, value, stream);
+        }
+
         if(const auto curr = pool->enqueue_remove(value, stream); curr != cudaSuccess && err == cudaSuccess) {
             err = curr;
         }
@@ -685,6 +735,10 @@ inline cudaError_t cuda_registry::destroy(It first, It last, cudaStream_t stream
 
     for(const auto value: range) {
         for(auto &&[key, pool]: pools) {
+            if(pool->contains(value)) {
+                publish_destroy(key, value, stream);
+            }
+
             if(const auto curr = pool->enqueue_remove(value, stream); curr != cudaSuccess && err == cudaSuccess) {
                 err = curr;
             }
@@ -800,6 +854,8 @@ inline cudaError_t cuda_registry::emplace_impl(const entity value, cudaStream_t 
         return fail(err);
     }
 
+    publish_construct(type_hash<Type>::value(), value, stream);
+
     if(const auto err = record_done(done, stream); err != cudaSuccess) {
         return fail(err);
     }
@@ -819,9 +875,16 @@ inline cudaError_t cuda_registry::emplace_or_replace_impl(const entity value, cu
     }
 
     auto &component = pool<Type>();
+    const bool present = component.contains(value);
 
-    if(const auto err = (component.contains(value) ? component.replace(value, stream, std::forward<Args>(args)...) : component.emplace(value, stream, std::forward<Args>(args)...)); err != cudaSuccess) {
+    if(const auto err = (present ? component.replace(value, stream, std::forward<Args>(args)...) : component.emplace(value, stream, std::forward<Args>(args)...)); err != cudaSuccess) {
         return fail(err);
+    }
+
+    if(present) {
+        publish_update(type_hash<Type>::value(), value, stream);
+    } else {
+        publish_construct(type_hash<Type>::value(), value, stream);
     }
 
     if(const auto err = record_done(done, stream); err != cudaSuccess) {
@@ -848,6 +911,8 @@ inline cudaError_t cuda_registry::get_or_emplace_impl(const entity value, cudaSt
         if(const auto err = component.emplace(value, stream, std::forward<Args>(args)...); err != cudaSuccess) {
             return fail(err);
         }
+
+        publish_construct(type_hash<Type>::value(), value, stream);
     }
 
     if(const auto err = record_done(done, stream); err != cudaSuccess) {
@@ -877,6 +942,8 @@ inline cudaError_t cuda_registry::replace_impl(const entity value, cudaStream_t 
     if(const auto err = component.replace(value, stream, std::forward<Args>(args)...); err != cudaSuccess) {
         return fail(err);
     }
+
+    publish_update(type_hash<Type>::value(), value, stream);
 
     if(const auto err = record_done(done, stream); err != cudaSuccess) {
         return fail(err);
@@ -911,6 +978,8 @@ inline cudaError_t cuda_registry::insert(It first, It last, const Type &value, c
         if(const auto err = component.emplace(entity, stream, value); err != cudaSuccess) {
             return fail(err);
         }
+
+        publish_construct(type_hash<Type>::value(), entity, stream);
     }
 
     if(const auto err = record_done(done, stream); err != cudaSuccess) {
@@ -948,6 +1017,7 @@ inline cudaError_t cuda_registry::insert(EIt first, EIt last, CIt from, cudaStre
             return fail(err);
         }
 
+        publish_construct(type_hash<Type>::value(), entity, stream);
         ++from;
     }
 
@@ -969,14 +1039,18 @@ inline cudaError_t cuda_registry::remove(const entity value, cudaStream_t stream
     }
 
     cudaError_t err = cudaSuccess;
-    const auto enqueue = [&](auto &component) {
+    const auto remove_one = [&](auto &component, const id_type id) {
+        if(component.contains(value)) {
+            publish_destroy(id, value, stream);
+        }
+
         if(const auto curr = component.enqueue_remove(value, stream); curr != cudaSuccess && err == cudaSuccess) {
             err = curr;
         }
     };
 
-    enqueue(pool<std::remove_const_t<Type>>());
-    ((enqueue(pool<std::remove_const_t<Other>>())), ...);
+    remove_one(pool<std::remove_const_t<Type>>(), type_hash<std::remove_const_t<Type>>::value());
+    ((remove_one(pool<std::remove_const_t<Other>>(), type_hash<std::remove_const_t<Other>>::value())), ...);
 
     if(err != cudaSuccess) {
         return fail(err);
@@ -1004,15 +1078,19 @@ inline cudaError_t cuda_registry::remove(It first, It last, cudaStream_t stream,
     }
 
     cudaError_t err = cudaSuccess;
-    const auto enqueue = [&](auto &component, const entity entity) {
+    const auto remove_one = [&](auto &component, const entity entity, const id_type id) {
+        if(component.contains(entity)) {
+            publish_destroy(id, entity, stream);
+        }
+
         if(const auto curr = component.enqueue_remove(entity, stream); curr != cudaSuccess && err == cudaSuccess) {
             err = curr;
         }
     };
 
     for(const auto entity: range) {
-        enqueue(pool<std::remove_const_t<Type>>(), entity);
-        ((enqueue(pool<std::remove_const_t<Other>>(), entity)), ...);
+        remove_one(pool<std::remove_const_t<Type>>(), entity, type_hash<std::remove_const_t<Type>>::value());
+        ((remove_one(pool<std::remove_const_t<Other>>(), entity, type_hash<std::remove_const_t<Other>>::value())), ...);
     }
 
     if(err != cudaSuccess) {
@@ -1194,6 +1272,8 @@ inline cudaError_t cuda_registry::assign(const entity value, const Type *pinned_
     if(const auto err = component.enqueue_assign(value, pinned_host_src, stream); err != cudaSuccess) {
         return fail(err);
     }
+
+    publish_update(type_hash<Type>::value(), value, stream);
 
     if(const auto err = record_done(done, stream); err != cudaSuccess) {
         return fail(err);
@@ -1605,6 +1685,98 @@ inline cudaError_t cuda_registry::sort(cudaStream_t stream, cudaEvent_t done) {
     return cudaSuccess;
 }
 
+/**
+ * @brief Utility to serialize a registry (or selected pools) to an archive.
+ *
+ * Component values are downloaded synchronously before serialization; identity
+ * and values are serialized, never process-local pointers.
+ */
+class cuda_snapshot {
+    const cuda_registry *registry;
+
+public:
+    explicit cuda_snapshot(const cuda_registry &owner) noexcept
+        : registry{&owner} {}
+
+    template<typename Type, typename Archive>
+    const cuda_snapshot &get(Archive &archive, const id_type id = type_hash<Type>::value()) const {
+        if constexpr(std::is_same_v<Type, entity>) {
+            const auto alive = registry->identity.free_list();
+            archive(static_cast<id_type>(alive));
+
+            for(std::size_t pos = 0u; pos < alive; ++pos) {
+                archive(registry->identity.data()[pos]);
+            }
+        } else if(const auto *storage = registry->template storage<Type>(id); storage != nullptr) {
+            const auto size = storage->size();
+            archive(static_cast<id_type>(size));
+
+            std::vector<std::remove_const_t<Type>> values(size);
+            storage->download(values.data());
+
+            for(std::size_t pos = 0u; pos < size; ++pos) {
+                archive(storage->data()[pos]);
+
+                if constexpr(!std::is_empty_v<Type>) {
+                    archive(std::as_const(values)[pos]);
+                }
+            }
+        } else {
+            archive(id_type{0});
+        }
+
+        return *this;
+    }
+};
+
+/**
+ * @brief Utility to restore a snapshot into an empty registry.
+ */
+class cuda_snapshot_loader {
+    cuda_registry *registry;
+
+public:
+    explicit cuda_snapshot_loader(cuda_registry &owner) noexcept
+        : registry{&owner} {}
+
+    template<typename Type, typename Archive>
+    cuda_snapshot_loader &get(Archive &archive, const id_type id = type_hash<Type>::value()) {
+        id_type length{};
+        archive(length);
+
+        if constexpr(std::is_same_v<Type, entity>) {
+            for(id_type pos = 0u; pos < length; ++pos) {
+                entity entt{};
+                archive(entt);
+                registry->identity.generate(entt);
+            }
+        } else {
+            auto &storage = registry->template storage<Type>(id);
+
+            while(length--) {
+                entity entt{};
+                archive(entt);
+
+                if(entt != entt::null) {
+                    if(!registry->identity.contains(entt)) {
+                        registry->identity.generate(entt);
+                    }
+
+                    if constexpr(std::is_empty_v<Type>) {
+                        storage.emplace(entt, nullptr);
+                    } else {
+                        std::remove_const_t<Type> value{};
+                        archive(value);
+                        storage.emplace(entt, nullptr, value);
+                    }
+                }
+            }
+        }
+
+        return *this;
+    }
+};
+
 #ifdef __CUDACC__
 
 template<typename... Get, typename... Exclude>
@@ -1719,6 +1891,8 @@ inline cudaError_t cuda_registry::patch_impl(const entity value, cudaStream_t st
             return fail(err);
         }
     }
+
+    publish_update(type_hash<Type>::value(), value, stream);
 
     if(const auto err = record_done(done, stream); err != cudaSuccess) {
         return fail(err);

@@ -14,7 +14,6 @@ if(GIT_FOUND AND EXISTS "${entt_cuda_reference}/.git")
         OUTPUT_VARIABLE entt_cuda_revision
         OUTPUT_STRIP_TRAILING_WHITESPACE
         RESULT_VARIABLE entt_cuda_git_result)
-
     if(NOT entt_cuda_git_result EQUAL 0 OR NOT entt_cuda_revision STREQUAL ENTT_CUDA_ENTT_REVISION)
         message(FATAL_ERROR "EnTT must be pinned to ${ENTT_CUDA_ENTT_REVISION}; found ${entt_cuda_revision}.")
     endif()

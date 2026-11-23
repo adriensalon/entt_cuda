@@ -385,6 +385,15 @@ public:
         return index_of(value);
     }
 
+    /*! @brief Downloads every component value into host memory (synchronous). */
+    void download(Type *dst) const {
+        if constexpr(has_value) {
+            if(count != 0u) {
+                cudaMemcpy(dst, d_payload, count * sizeof(Type), cudaMemcpyDeviceToHost);
+            }
+        }
+    }
+
     /*! @brief Clears every member; host-only, no device submission. */
     void clear() noexcept override {
         packed.clear();
